@@ -37,6 +37,65 @@ static void load_process_table()
     // todo
 }
 
+static int read_ppid_from_proc(pid_t pid, pid_t *ppid_out)
+{
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%d/status", (int)pid);
+
+    FILE *fp = fopen(path, "r");
+    if (!fp) return -1;
+
+    char line[256];
+    while (fgets(line, sizeof(line), fp))
+    {
+        if (strncmp(line, "PPid:", 5) == 0)
+        {
+            char *p = line + 5;
+            while (*p && isspace((unsigned char)*p))
+                p++;
+
+            long ppid_val = strtol(p, NULL, 10);
+            fclose(fp);
+
+            if (ppid_val < 0 || ppid_val > INT_MAX)
+                return -1;
+
+            *ppid_out = (pid_t)ppid_val;
+            return 0;
+        }
+    }
+
+    fclose(fp);
+    return -1;
+}
+
+static void opt_default(pid_t process_id, pid_t root_process)
+{
+    pid_t current = process_id;
+
+    while (current > 0)
+    {
+        if (current == root_process)
+        {
+            printf("%d %d\n", (int)process_id, (int)root_process);
+            exit(EXIT_SUCCESS);
+        }
+
+        pid_t parent = -1;
+        if (read_ppid_from_proc(current, &parent) != 0)
+            break;
+
+        if (parent <= 0 || parent == current)
+            break;
+
+        current = parent;
+    }
+
+    printf("Process %d does not belong to the process subtree rooted at %d\n",
+           (int)process_id, (int)root_process);
+    exit(EXIT_FAILURE);
+}
+
 // lists the count of all descendants of process_id
 static void opt_cnt(pid_t process_id)
 {
@@ -119,10 +178,10 @@ int main(int argc, char **argv)
     pid_t root_process = (pid_t)argv1;
     pid_t process_id = (pid_t)argv2;
 
+    // no option, do default process
     if (argc == 3)
     {
-        // no option, just print process_id and its ppid
-        printf("%d %d\n", process_id, root_process);
+        opt_default(process_id, root_process);
         return 0;
     }
 
