@@ -1,6 +1,6 @@
 /*
- * A1_Lei_Jiang.c
- * COMP 8567 - Assignment 1
+ * A1_Lei_Jiang_110195911.c
+ * COMP 8567 - Assignment
  *
  * Traverse directory tree using nftw() (ftw.h)
  *
