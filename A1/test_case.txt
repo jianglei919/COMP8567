@@ -1,0 +1,119 @@
+cd /home/jiang6m/workspace/MyProject/A1
+ls
+
+# clean + recreate test folder (ONLY this folder)
+TESTROOT="/home/jiang6m/workspace/MyProject/A1/dtreew26_test"
+rm -rf "$TESTROOT"
+mkdir -p "$TESTROOT"
+echo "TESTROOT=$TESTROOT"
+
+DIR1="$TESTROOT/dir1"
+ROOTDIR="$TESTROOT/rootdir"
+DESTCOPY="$TESTROOT/dest_copy"
+DESTMOVE="$TESTROOT/dest_move"
+
+mkdir -p "$DIR1" "$ROOTDIR" "$DESTCOPY" "$DESTMOVE"
+mkdir -p "$ROOTDIR/subA/subA1" "$ROOTDIR/subB" "$ROOTDIR/emptyDir"
+mkdir -p "$DIR1/inside"
+
+# files for -flist / -tcount (one-level only)
+printf "aaa\n" > "$DIR1/a.txt"
+printf "bbb\n" > "$DIR1/b.c"
+printf "ccc\n" > "$DIR1/c.log"
+printf "nested\n" > "$DIR1/inside/nested.txt"   # should NOT show in flist/tcount
+
+# set mtimes for flist sorting (newest -> oldest)
+touch -t 202602051200 "$DIR1/b.c"
+touch -t 202602051300 "$DIR1/a.txt"
+touch -t 202602051100 "$DIR1/c.log"
+
+# files for recursive features
+printf "r1\n" > "$ROOTDIR/r1.txt"
+printf "r2\n" > "$ROOTDIR/subA/r2.txt"
+printf "r3\n" > "$ROOTDIR/subA/subA1/r3.c"
+printf "r4\n" > "$ROOTDIR/subB/r4.c"
+printf "target\n" > "$ROOTDIR/subB/target.bin"
+
+# big/small for -lfsize
+dd if=/dev/zero of="$ROOTDIR/big.dat" bs=1024 count=200 status=none
+dd if=/dev/zero of="$ROOTDIR/small.dat" bs=1024 count=5 status=none
+
+# non-writable for -nonwr
+printf "no write\n" > "$ROOTDIR/readonly.txt"
+chmod a-w "$ROOTDIR/readonly.txt"
+
+# files for -remd
+printf "remove me\n" > "$ROOTDIR/subA/remove.tmp"
+printf "keep me\n" > "$ROOTDIR/subA/keep.tmp2"
+
+# move source
+MOVESRC="$TESTROOT/move_src"
+mkdir -p "$MOVESRC/sub1"
+printf "m1\n" > "$MOVESRC/m1.txt"
+printf "m2\n" > "$MOVESRC/sub1/m2.txt"
+
+echo "=== Setup done ==="
+
+
+-flist
+ls -lht ./dtreew26_test/dir1
+./dtreew26 -flist ./dtreew26_test/dir1
+./dtreew26 -flist ./dtreew26_test/dir2
+
+
+-tcount
+./dtreew26 -tcount .txt ./dtreew26_test/dir1
+./dtreew26 -tcount .txt .c ./dtreew26_test/dir1
+./dtreew26 -tcount .txt .c .log ./dtreew26_test/dir1
+./dtreew26 -tcount .txt .c .log2 ./dtreew26_test/dir1
+
+
+-srchf
+ls -lht ./dtreew26_test/rootdir
+./dtreew26 -srchf target.bin ./dtreew26_test/rootdir
+./dtreew26 -srchf not_exist.txt ./dtreew26_test/rootdir
+
+
+-dircnt
+ls ./dtreew26_test/rootdir
+./dtreew26 -dircnt ./dtreew26_test/rootdir
+ls ./dtreew26_test/rootdir/emptyDir
+./dtreew26 -dircnt ./dtreew26_test/rootdir/emptyDir
+./dtreew26 -dircnt ./dtreew26_test/rootdir2
+
+
+-sumfilesize
+ls ./dtreew26_test/rootdir
+./dtreew26 -sumfilesize ./dtreew26_test/rootdir
+./dtreew26 -sumfilesize ./dtreew26_test/rootdir/emptyDir
+
+
+-lfsize
+./dtreew26 -lfsize ./dtreew26_test/rootdir
+./dtreew26 -lfsize ./dtreew26_test/rootdir/emptyDir
+
+
+-nonwr
+ls -lht ./dtreew26_test/rootdir
+./dtreew26 -nonwr ./dtreew26_test/rootdir
+
+
+-copyd
+ls ./dtreew26_test/rootdir
+ls ./dtreew26_test/dest_copy
+./dtreew26 -copyd ./dtreew26_test/rootdir ./dtreew26_test/dest_copy
+ls -l ./dtreew26_test/dest_copy/rootdir || true
+
+
+-dmove
+ls ./dtreew26_test/move_src
+./dtreew26 -dmove ./dtreew26_test/move_src ./dtreew26_test/dest_move
+test -e ./dtreew26_test/move_src && echo "ERROR: source still exists" || echo "OK: source removed"
+find ./dtreew26_test/dest_move/move_src -type f
+ls ./dtreew26_test/move_src
+
+
+-remd
+find ./dtreew26_test/rootdir -name "*.tmp" -o -name "*.tmp2"
+./dtreew26 -remd ./dtreew26_test/rootdir .tmp
+find ./dtreew26_test/rootdir -name "*.tmp" -o -name "*.tmp2"
