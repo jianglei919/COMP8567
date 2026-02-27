@@ -43,7 +43,8 @@ static int read_ppid_from_proc(pid_t pid, pid_t *ppid_out)
     snprintf(path, sizeof(path), "/proc/%d/status", (int)pid);
 
     FILE *fp = fopen(path, "r");
-    if (!fp) return -1;
+    if (!fp)
+        return -1;
 
     char line[256];
     while (fgets(line, sizeof(line), fp))
@@ -67,6 +68,108 @@ static int read_ppid_from_proc(pid_t pid, pid_t *ppid_out)
 
     fclose(fp);
     return -1;
+}
+
+static int is_bash_process(pid_t pid)
+{
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%d/comm", (int)pid);
+
+    FILE *fp = fopen(path, "r");
+    if (!fp)
+        return 0;
+
+    char name[64] = {0};
+    if (!fgets(name, sizeof(name), fp))
+    {
+        fclose(fp);
+        return 0;
+    }
+    fclose(fp);
+
+    name[strcspn(name, "\n")] = '\0';
+    return strcmp(name, "bash") == 0;
+}
+
+static pid_t find_current_bash_ancestor(void)
+{
+    pid_t current = getpid();
+    while (current > 1)
+    {
+        if (is_bash_process(current))
+            return current;
+
+        pid_t parent = -1;
+        if (read_ppid_from_proc(current, &parent) != 0)
+            break;
+        if (parent <= 1 || parent == current)
+            break;
+
+        current = parent;
+    }
+
+    return -1;
+}
+
+/**
+ * 向上查父链，判断是否属于 bash 子树
+ *
+ * 先遍历系统里每个进程 pid
+ * 对每个 pid 向上追 PPid 链
+ * 只要在追溯过程中遇到 bash_pid，这个 pid 就属于 bash 子树，计数 +1
+ */
+static void bcp()
+{
+    pid_t bash_pid = find_current_bash_ancestor();
+    if (bash_pid <= 0)
+    {
+        fprintf(stderr, "Cannot locate current bash ancestor process.\n");
+        exit(EXIT_FAILURE);
+    }
+
+    long count = 0;
+
+    DIR *dir = opendir("/proc");
+    if (!dir)
+        die_perror("opendir /proc");
+
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL)
+    {
+        if (!isdigit((unsigned char)entry->d_name[0]))
+            continue;
+
+        char *end = NULL;
+        long value = strtol(entry->d_name, &end, 10);
+        if (!end || *end != '\0' || value <= 0 || value > INT_MAX)
+            continue;
+
+        pid_t pid = (pid_t)value;
+        if (pid == bash_pid)
+            continue;
+
+        pid_t current = pid;
+        while (current > 0)
+        {
+            pid_t parent = -1;
+            if (read_ppid_from_proc(current, &parent) != 0)
+                break;
+
+            if (parent == bash_pid)
+            {
+                count++;
+                break;
+            }
+
+            if (parent <= 1 || parent == current)
+                break;
+
+            current = parent;
+        }
+    }
+
+    closedir(dir);
+    printf("%ld\n", count);
 }
 
 static void opt_default(pid_t process_id, pid_t root_process)
@@ -122,11 +225,7 @@ int main(int argc, char **argv)
 
     if (argc == 2 && strcmp(argv[1], "-bcp") == 0)
     {
-        // ptree26w -bcp (No other arguments) count of the number of processes started under the current bash
-        // Includes nested children, background processes, etc
-
-        // todo: implement this function
-        printf("bcp");
+        bcp();
         return 0;
     }
     if (argc == 2 && strcmp(argv[1], "-bop") == 0)
