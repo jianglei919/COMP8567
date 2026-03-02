@@ -91,6 +91,16 @@ static int is_bash_process(pid_t pid)
     return strcmp(name, "bash") == 0;
 }
 
+static int pid_in_list(pid_t pid, const pid_t *list, size_t count)
+{
+    for (size_t i = 0; i < count; i++)
+    {
+        if (list[i] == pid)
+            return 1;
+    }
+    return 0;
+}
+
 static pid_t find_current_bash_ancestor(void)
 {
     pid_t current = getpid();
@@ -118,7 +128,7 @@ static pid_t find_current_bash_ancestor(void)
  * 对每个 pid 向上追 PPid 链
  * 只要在追溯过程中遇到 bash_pid，这个 pid 就属于 bash 子树，计数 +1
  */
-static void bcp()
+static void opt_bcp()
 {
     pid_t bash_pid = find_current_bash_ancestor();
     if (bash_pid <= 0)
@@ -169,6 +179,92 @@ static void bcp()
     }
 
     closedir(dir);
+    printf("%ld\n", count);
+}
+
+/**
+ * 统计所有打开的 bash 终端（不包括 bash 进程本身）中进程的总数
+ *
+ * 第一次遍历 proc：收集所有 bash 的 PID
+ * 第二次遍历 proc：对每个非 bash 进程向上追父链，只要遇到一个 bash_pid 就计数 +1，并且这个进程不再继续追父链了
+ *
+ */
+static void opt_bop()
+{
+    DIR *dir = opendir("/proc");
+    if (!dir)
+        die_perror("opendir /proc");
+
+    pid_t *bash_pids = NULL;
+    size_t bash_count = 0;
+
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL)
+    {
+        if (!isdigit((unsigned char)entry->d_name[0]))
+            continue;
+
+        char *end = NULL;
+        long value = strtol(entry->d_name, &end, 10);
+        if (!end || *end != '\0' || value <= 0 || value > INT_MAX)
+            continue;
+
+        pid_t pid = (pid_t)value;
+        if (!is_bash_process(pid))
+            continue;
+
+        printf("Found bash process: %d\n", (int)pid);
+        pid_t *new_list = realloc(bash_pids, (bash_count + 1) * sizeof(*bash_pids));
+        if (!new_list)
+        {
+            free(bash_pids);
+            closedir(dir);
+            die_perror("realloc");
+        }
+
+        bash_pids = new_list;
+        bash_pids[bash_count++] = pid;
+    }
+
+    rewinddir(dir); // 重新遍历 proc 统计所有 bash 终端中的进程数
+
+    long count = 0;
+    while ((entry = readdir(dir)) != NULL)
+    {
+        if (!isdigit((unsigned char)entry->d_name[0]))
+            continue;
+
+        char *end = NULL;
+        long value = strtol(entry->d_name, &end, 10);
+        if (!end || *end != '\0' || value <= 0 || value > INT_MAX)
+            continue;
+
+        pid_t pid = (pid_t)value;
+        if (pid_in_list(pid, bash_pids, bash_count))
+            continue;
+
+        pid_t current = pid;
+        while (current > 0)
+        {
+            pid_t parent = -1;
+            if (read_ppid_from_proc(current, &parent) != 0)
+                break;
+
+            if (pid_in_list(parent, bash_pids, bash_count))
+            {
+                count++;
+                break;
+            }
+
+            if (parent <= 1 || parent == current)
+                break;
+
+            current = parent;
+        }
+    }
+
+    closedir(dir);
+    free(bash_pids);
     printf("%ld\n", count);
 }
 
@@ -225,15 +321,13 @@ int main(int argc, char **argv)
 
     if (argc == 2 && strcmp(argv[1], "-bcp") == 0)
     {
-        bcp();
+        opt_bcp();
         return 0;
     }
     if (argc == 2 && strcmp(argv[1], "-bop") == 0)
     {
-        // ptree26w -bop (No other arguments) count the overall number of processes in all open bash terminals(excluding the bash processes in the count)
-        printf("bop");
-
-        // todo: implement this function
+        // count the overall number of processes in all open bash terminals(excluding the bash processes in the count)
+        opt_bop();
         return 0;
     }
 
