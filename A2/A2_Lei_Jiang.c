@@ -32,11 +32,6 @@ typedef struct Proc
     int is_bash;           /* 1 if bash, else 0 */
 } Proc;
 
-static void load_process_table()
-{
-    // todo
-}
-
 static int read_ppid_from_proc(pid_t pid, pid_t *ppid_out)
 {
     char path[64];
@@ -268,7 +263,7 @@ static void opt_bop()
     printf("%ld\n", count);
 }
 
-static void opt_default(pid_t process_id, pid_t root_process)
+static int opt_default(pid_t process_id, pid_t root_process)
 {
     pid_t current = process_id;
 
@@ -277,7 +272,7 @@ static void opt_default(pid_t process_id, pid_t root_process)
         if (current == root_process)
         {
             printf("%d %d\n", (int)process_id, (int)root_process);
-            exit(EXIT_SUCCESS);
+            return 0;
         }
 
         pid_t parent = -1;
@@ -292,14 +287,57 @@ static void opt_default(pid_t process_id, pid_t root_process)
 
     printf("Process %d does not belong to the process subtree rooted at %d\n",
            (int)process_id, (int)root_process);
-    exit(EXIT_FAILURE);
+    return -1;
 }
 
-// lists the count of all descendants of process_id
+/**
+ * -cnt：统计 process_id 的后代总数。
+ * 实现思路：遍历 /proc 中的每个 pid，对每个 pid 向上追父链，如果在追溯过程中遇到 process_id 就计数 +1
+ */
 static void opt_cnt(pid_t process_id)
 {
-    printf("cnt");
-    // todo: implement this function
+    DIR *dir = opendir("/proc");
+    if (!dir)
+        die_perror("opendir /proc");
+
+    long count = 0;
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL)
+    {
+        if (!isdigit((unsigned char)entry->d_name[0]))
+            continue;
+
+        char *end = NULL;
+        long value = strtol(entry->d_name, &end, 10);
+        if (!end || *end != '\0' || value <= 0 || value > INT_MAX)
+            continue;
+
+        pid_t pid = (pid_t)value;
+        if (pid == process_id)
+            continue;
+
+        pid_t current = pid;
+        while (current > 0)
+        {
+            pid_t parent = -1;
+            if (read_ppid_from_proc(current, &parent) != 0)
+                break;
+
+            if (parent == process_id)
+            {
+                count++;
+                break;
+            }
+
+            if (parent <= 1 || parent == current)
+                break;
+
+            current = parent;
+        }
+    }
+
+    closedir(dir);
+    printf("%ld\n", count);
 }
 
 static void usage(const char *prog)
@@ -374,12 +412,12 @@ int main(int argc, char **argv)
     // no option, do default process
     if (argc == 3)
     {
-        opt_default(process_id, root_process);
+        if (opt_default(process_id, root_process) != 0)
+            return EXIT_FAILURE;
         return 0;
     }
-
-    // get opt from command line arguments
-    load_process_table();
+    if (opt_default(process_id, root_process) != 0)
+        return EXIT_FAILURE;
 
     char *opt = (argc == 4) ? argv[3] : NULL;
     if (!opt)
