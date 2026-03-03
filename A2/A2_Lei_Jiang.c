@@ -226,6 +226,37 @@ static int proc_pid_in_list(pid_t pid, const Proc *list, size_t count)
 }
 
 /**
+ * 用途：从 /proc/stat 中读取系统启动时间（btime 字段），保存在 boot_time_out 中，单位是 epoch 秒。
+ */
+static int read_boot_time_epoch(time_t *boot_time_out)
+{
+    if (!boot_time_out)
+        return -1;
+
+    FILE *fp = fopen("/proc/stat", "r");
+    if (!fp)
+        return -1;
+
+    char line[256];
+    while (fgets(line, sizeof(line), fp))
+    {
+        if (strncmp(line, "btime ", 6) == 0)
+        {
+            char *p = line + 6;
+            long long val = strtoll(p, NULL, 10);
+            fclose(fp);
+            if (val <= 0)
+                return -1;
+            *boot_time_out = (time_t)val;
+            return 0;
+        }
+    }
+
+    fclose(fp);
+    return -1;
+}
+
+/**
  * 从 /proc 中收集 root_pid 的所有后代进程信息，保存在 descendants_out 中，并将后代数量保存在 descendants_count_out 中。
  * 实现思路：
  * 遍历 /proc 中的每个 pid，对每个 pid 向上追父链，如果在追溯过程中遇到 root_pid 就把这个 pid 的信息加入 descendants_out 中，并且这个 pid 不再继续追父链了
@@ -579,6 +610,71 @@ static void opt_dtm(pid_t process_id)
     free_proc_list(&descendants);
 }
 
+/**
+ * -odt：找到 process_id 的所有后代中最早创建的那个进程（即 starttime 最小的那个进程），输出它的 PID 和创建时间（格式为 "Wed 01 Jan 2020 12:00:00 PM UTC"）。如果有多个后代的 starttime 一样，则选择 PID 最小的那个。
+ * 实现思路：
+ * 第一次遍历 /proc 中的每个 pid，对每个 pid 向上追父链，如果在追溯过程中遇到 process_id 就把这个 pid 的信息加入 descendants_out 中，并且这个 pid 不再继续追父链了
+ * 第二次遍历 descendants_out，找到 starttime 最小的那个进程，如果有多个后代的 starttime 一样，则选择 PID 最小的那个
+ * 第三次根据找到的进程的 starttime 和系统启动时间计算出这个进程的创建时间，并按照指定格式输出
+ */
+static void opt_odt(pid_t process_id)
+{
+    ProcList descendants = {0};
+    if (collect_descendants(process_id, &descendants) != 0)
+        die_perror("collect_descendants");
+
+    if (descendants.count == 0)
+    {
+        free_proc_list(&descendants);
+        return;
+    }
+
+    size_t oldest_idx = (size_t)-1;
+    for (size_t i = 0; i < descendants.count; i++)
+    {
+        if (descendants.proc_items[i].start_ticks < 0)
+            continue;
+
+        if (oldest_idx == (size_t)-1)
+        {
+            oldest_idx = i;
+            continue;
+        }
+
+        if (descendants.proc_items[i].start_ticks < descendants.proc_items[oldest_idx].start_ticks)
+            oldest_idx = i;
+        else if (descendants.proc_items[i].start_ticks == descendants.proc_items[oldest_idx].start_ticks &&
+                 descendants.proc_items[i].pid < descendants.proc_items[oldest_idx].pid)
+            oldest_idx = i;
+    }
+
+    if (oldest_idx != (size_t)-1)
+    {
+        time_t boot_time = 0;
+        long clk_tck = sysconf(_SC_CLK_TCK);
+        char time_buf[128] = "unknown";
+
+        if (clk_tck > 0 && read_boot_time_epoch(&boot_time) == 0)
+        {
+            time_t creation_time = boot_time +
+                                   (time_t)(descendants.proc_items[oldest_idx].start_ticks / clk_tck);
+            struct tm tm_local;
+            if (localtime_r(&creation_time, &tm_local) != NULL)
+            {
+                if (strftime(time_buf, sizeof(time_buf), "%a %d %b %Y %I:%M:%S %p %Z", &tm_local) == 0)
+                    strcpy(time_buf, "unknown");
+            }
+        }
+
+        printf("Oldest descendant of %d is %d, whose creation time is %s\n",
+               (int)process_id,
+               (int)descendants.proc_items[oldest_idx].pid,
+               time_buf);
+    }
+
+    free_proc_list(&descendants);
+}
+
 int main(int argc, char **argv)
 {
 
@@ -656,8 +752,8 @@ int main(int argc, char **argv)
         opt_oct(process_id);
     else if (strcmp(opt, "-dtm") == 0)
         opt_dtm(process_id);
-    // else if (strcmp(opt, "-odt") == 0)
-    //     opt_odt(process_id, &pv, &cm);
+    else if (strcmp(opt, "-odt") == 0)
+        opt_odt(process_id);
     // else if (strcmp(opt, "-ndt") == 0)
     //     opt_ndt(process_id, &pv, &cm);
     // else if (strcmp(opt, "-dnd") == 0)
