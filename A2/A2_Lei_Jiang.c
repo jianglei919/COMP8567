@@ -46,6 +46,15 @@ typedef struct Proc
     int is_bash;           /* 1 if bash, else 0 */
 } Proc;
 
+typedef struct ProcList
+{
+    Proc *proc_items;
+    size_t count;
+} ProcList;
+
+/**
+ * 用途：读取 /proc/<pid>/stat 中的 PPid 字段，保存在 ppid_out 中。
+ */
 static int read_ppid_from_proc(pid_t pid, pid_t *ppid_out)
 {
     char path[64];
@@ -77,6 +86,224 @@ static int read_ppid_from_proc(pid_t pid, pid_t *ppid_out)
 
     fclose(fp);
     return -1;
+}
+
+/**
+ * 用途：读取 /proc/<pid>/stat 和 /proc/<pid>/status 中的信息，填充到 proc_out 中。
+ */
+static int read_proc_info(pid_t pid, Proc *proc_out)
+{
+    if (!proc_out)
+        return -1;
+
+    memset(proc_out, 0, sizeof(*proc_out));
+    proc_out->pid = pid;
+    proc_out->ppid = -1;
+    proc_out->state = '\0';
+    proc_out->start_ticks = -1;
+    proc_out->vmrss_bytes = -1;
+
+    char stat_path[64];
+    snprintf(stat_path, sizeof(stat_path), "/proc/%d/stat", (int)pid);
+
+    FILE *fp = fopen(stat_path, "r");
+    if (!fp)
+        return -1;
+
+    char line[4096];
+    if (!fgets(line, sizeof(line), fp))
+    {
+        fclose(fp);
+        return -1;
+    }
+    fclose(fp);
+
+    char *right_paren = strrchr(line, ')');
+    if (!right_paren || *(right_paren + 1) != ' ')
+        return -1;
+
+    char *cursor = right_paren + 2;
+    int field_no = 3;
+    char *saveptr = NULL;
+    char *token = strtok_r(cursor, " ", &saveptr);
+
+    while (token)
+    {
+        if (field_no == 3)
+            proc_out->state = token[0];
+        else if (field_no == 4)
+            proc_out->ppid = (pid_t)strtol(token, NULL, 10);
+        else if (field_no == 14)
+            proc_out->utime_ticks = strtol(token, NULL, 10);
+        else if (field_no == 15)
+            proc_out->stime_ticks = strtol(token, NULL, 10);
+        else if (field_no == 22)
+            proc_out->start_ticks = strtoll(token, NULL, 10);
+
+        field_no++;
+        token = strtok_r(NULL, " ", &saveptr);
+    }
+
+    char status_path[64];
+    snprintf(status_path, sizeof(status_path), "/proc/%d/status", (int)pid);
+    fp = fopen(status_path, "r");
+    if (!fp)
+        return 0;
+
+    char status_line[256];
+    while (fgets(status_line, sizeof(status_line), fp))
+    {
+        if (strncmp(status_line, "Name:", 5) == 0)
+        {
+            char *p = status_line + 5;
+            while (*p && isspace((unsigned char)*p))
+                p++;
+            strncpy(proc_out->name, p, sizeof(proc_out->name) - 1);
+            proc_out->name[sizeof(proc_out->name) - 1] = '\0';
+            proc_out->name[strcspn(proc_out->name, "\n")] = '\0';
+        }
+        else if (strncmp(status_line, "VmRSS:", 6) == 0)
+        {
+            char *p = status_line + 6;
+            while (*p && isspace((unsigned char)*p))
+                p++;
+            long long vmrss_kb = strtoll(p, NULL, 10);
+            if (vmrss_kb >= 0)
+                proc_out->vmrss_bytes = vmrss_kb * 1024;
+        }
+    }
+    fclose(fp);
+
+    proc_out->is_bash = (strcmp(proc_out->name, "bash") == 0);
+    return 0;
+}
+
+/**
+ * 用途：把一个 pid 追加到一个动态数组（pid_t 列表）末尾，并更新数组指针和元素个数。
+ */
+static int append_pid(pid_t **list, size_t *count, pid_t pid)
+{
+    pid_t *new_list = realloc(*list, (*count + 1) * sizeof(**list));
+    if (!new_list)
+        return -1;
+
+    *list = new_list;
+    (*list)[*count] = pid;
+    (*count)++;
+    return 0;
+}
+
+static int append_proc(ProcList *list, const Proc *proc)
+{
+    Proc *new_list = realloc(list->proc_items, (list->count + 1) * sizeof(*list->proc_items));
+    if (!new_list)
+        return -1;
+
+    list->proc_items = new_list;
+    list->proc_items[list->count] = *proc;
+    list->count++;
+    return 0;
+}
+
+static void free_proc_list(ProcList *list)
+{
+    if (!list)
+        return;
+
+    free(list->proc_items);
+    list->proc_items = NULL;
+    list->count = 0;
+}
+
+static int proc_pid_in_list(pid_t pid, const Proc *list, size_t count)
+{
+    for (size_t i = 0; i < count; i++)
+    {
+        if (list[i].pid == pid)
+            return 1;
+    }
+    return 0;
+}
+
+/**
+ * 从 /proc 中收集 root_pid 的所有后代进程信息，保存在 descendants_out 中，并将后代数量保存在 descendants_count_out 中。
+ * 实现思路：
+ * 遍历 /proc 中的每个 pid，对每个 pid 向上追父链，如果在追溯过程中遇到 root_pid 就把这个 pid 的信息加入 descendants_out 中，并且这个 pid 不再继续追父链了
+ */
+static int collect_descendants(pid_t root_pid, ProcList *descendants_out)
+{
+    if (!descendants_out)
+        return -1;
+
+    DIR *dir = opendir("/proc");
+    if (!dir)
+        return -1;
+
+    ProcList descendants = {0};
+
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL)
+    {
+        if (!isdigit((unsigned char)entry->d_name[0]))
+            continue;
+
+        char *end = NULL;
+        long value = strtol(entry->d_name, &end, 10);
+        if (!end || *end != '\0' || value <= 0 || value > INT_MAX)
+            continue;
+
+        pid_t pid = (pid_t)value;
+        if (pid == root_pid)
+            continue;
+
+        pid_t current = pid;
+        while (current > 0)
+        {
+            pid_t parent = -1;
+            if (read_ppid_from_proc(current, &parent) != 0)
+                break;
+
+            if (parent == root_pid)
+            {
+                Proc proc;
+                if (read_proc_info(pid, &proc) != 0)
+                    break;
+
+                if (append_proc(&descendants, &proc) != 0)
+                {
+                    free_proc_list(&descendants);
+                    closedir(dir);
+                    return -1;
+                }
+                break;
+            }
+
+            if (parent <= 1 || parent == current)
+                break;
+
+            current = parent;
+        }
+    }
+
+    closedir(dir);
+    *descendants_out = descendants;
+    return 0;
+}
+
+static int cmp_proc_start_desc(const void *a, const void *b)
+{
+    const Proc *ea = (const Proc *)a;
+    const Proc *eb = (const Proc *)b;
+
+    if (ea->start_ticks < eb->start_ticks)
+        return 1;
+    if (ea->start_ticks > eb->start_ticks)
+        return -1;
+    if (ea->pid < eb->pid)
+        return 1;
+    if (ea->pid > eb->pid)
+        return -1;
+    return 0;
 }
 
 static int is_bash_process(pid_t pid)
@@ -146,49 +373,12 @@ static void opt_bcp()
         exit(EXIT_FAILURE);
     }
 
-    long count = 0;
+    ProcList descendants = {0};
+    if (collect_descendants(bash_pid, &descendants) != 0)
+        die_perror("collect_descendants");
 
-    DIR *dir = opendir("/proc");
-    if (!dir)
-        die_perror("opendir /proc");
-
-    struct dirent *entry;
-    while ((entry = readdir(dir)) != NULL)
-    {
-        if (!isdigit((unsigned char)entry->d_name[0]))
-            continue;
-
-        char *end = NULL;
-        long value = strtol(entry->d_name, &end, 10);
-        if (!end || *end != '\0' || value <= 0 || value > INT_MAX)
-            continue;
-
-        pid_t pid = (pid_t)value;
-        if (pid == bash_pid)
-            continue;
-
-        pid_t current = pid;
-        while (current > 0)
-        {
-            pid_t parent = -1;
-            if (read_ppid_from_proc(current, &parent) != 0)
-                break;
-
-            if (parent == bash_pid)
-            {
-                count++;
-                break;
-            }
-
-            if (parent <= 1 || parent == current)
-                break;
-
-            current = parent;
-        }
-    }
-
-    closedir(dir);
-    printf("%ld\n", count);
+    printf("%zu\n", descendants.count);
+    free_proc_list(&descendants);
 }
 
 /**
@@ -234,46 +424,43 @@ static void opt_bop()
         bash_pids[bash_count++] = pid;
     }
 
-    rewinddir(dir); // 重新遍历 proc 统计所有 bash 终端中的进程数
+    closedir(dir);
 
-    long count = 0;
-    while ((entry = readdir(dir)) != NULL)
+    pid_t *all_pids = NULL;
+    size_t all_count = 0;
+
+    for (size_t i = 0; i < bash_count; i++)
     {
-        if (!isdigit((unsigned char)entry->d_name[0]))
-            continue;
-
-        char *end = NULL;
-        long value = strtol(entry->d_name, &end, 10);
-        if (!end || *end != '\0' || value <= 0 || value > INT_MAX)
-            continue;
-
-        pid_t pid = (pid_t)value;
-        if (pid_in_list(pid, bash_pids, bash_count))
-            continue;
-
-        pid_t current = pid;
-        while (current > 0)
+        ProcList descendants = {0};
+        if (collect_descendants(bash_pids[i], &descendants) != 0)
         {
-            pid_t parent = -1;
-            if (read_ppid_from_proc(current, &parent) != 0)
-                break;
-
-            if (pid_in_list(parent, bash_pids, bash_count))
-            {
-                count++;
-                break;
-            }
-
-            if (parent <= 1 || parent == current)
-                break;
-
-            current = parent;
+            free_proc_list(&descendants);
+            free(all_pids);
+            free(bash_pids);
+            die_perror("collect_descendants");
         }
+
+        for (size_t j = 0; j < descendants.count; j++)
+        {
+            pid_t pid = descendants.proc_items[j].pid;
+            if (pid_in_list(pid, all_pids, all_count)) // 去重
+                continue;
+
+            if (append_pid(&all_pids, &all_count, pid) != 0)
+            {
+                free_proc_list(&descendants);
+                free(all_pids);
+                free(bash_pids);
+                die_perror("realloc");
+            }
+        }
+
+        free_proc_list(&descendants);
     }
 
-    closedir(dir);
+    printf("%zu\n", all_count);
+    free(all_pids);
     free(bash_pids);
-    printf("%ld\n", count);
 }
 
 static int opt_default(pid_t process_id, pid_t root_process)
@@ -309,126 +496,87 @@ static int opt_default(pid_t process_id, pid_t root_process)
  */
 static void opt_cnt(pid_t process_id)
 {
-    DIR *dir = opendir("/proc");
-    if (!dir)
-        die_perror("opendir /proc");
+    ProcList descendants = {0};
+    if (collect_descendants(process_id, &descendants) != 0)
+        die_perror("collect_descendants");
 
-    long count = 0;
-    struct dirent *entry;
-    while ((entry = readdir(dir)) != NULL)
-    {
-        if (!isdigit((unsigned char)entry->d_name[0]))
-            continue;
-
-        char *end = NULL;
-        long value = strtol(entry->d_name, &end, 10);
-        if (!end || *end != '\0' || value <= 0 || value > INT_MAX)
-            continue;
-
-        pid_t pid = (pid_t)value;
-        if (pid == process_id)
-            continue;
-
-        pid_t current = pid;
-        while (current > 0)
-        {
-            pid_t parent = -1;
-            if (read_ppid_from_proc(current, &parent) != 0)
-                break;
-
-            if (parent == process_id)
-            {
-                count++;
-                break;
-            }
-
-            if (parent <= 1 || parent == current)
-                break;
-
-            current = parent;
-        }
-    }
-
-    closedir(dir);
-    printf("%ld\n", count);
+    printf("%zu\n", descendants.count);
+    free_proc_list(&descendants);
 }
 
+/**
+ * -oct：统计 process_id 的后代中已经成为孤儿的数量（即父进程已经不在 process_id 的子树中，或者父进程是 init 进程）。
+ * 实现思路：
+ * 第一次遍历 /proc 中的每个 pid，对每个 pid 向上追父链，如果在追溯过程中遇到 process_id 就把这个 pid 加入到一个列表中
+ * 第二次遍历这个列表，对每个 pid 向上追父链，如果在追溯过程中没有遇到 process_id 就说明这个 pid 已经成为孤儿了，计数 +1
+ */
 static void opt_oct(pid_t process_id)
 {
-    DIR *dir = opendir("/proc");
-    if (!dir)
-        die_perror("opendir /proc");
-
-    pid_t *subtree_pids = NULL;
-    size_t subtree_count = 0;
-
-    struct dirent *entry;
-    while ((entry = readdir(dir)) != NULL)
-    {
-        if (!isdigit((unsigned char)entry->d_name[0]))
-            continue;
-
-        char *end = NULL;
-        long value = strtol(entry->d_name, &end, 10);
-        if (!end || *end != '\0' || value <= 0 || value > INT_MAX)
-            continue;
-
-        pid_t pid = (pid_t)value;
-        if (pid == process_id)
-            continue;
-
-        pid_t current = pid;
-        int in_subtree = 0;
-        while (current > 0)
-        {
-            pid_t parent = -1;
-            if (read_ppid_from_proc(current, &parent) != 0)
-                break;
-
-            if (parent == process_id)
-            {
-                in_subtree = 1;
-                break;
-            }
-
-            if (parent <= 1 || parent == current)
-                break;
-
-            current = parent;
-        }
-
-        if (!in_subtree)
-            continue;
-
-        pid_t *new_list = realloc(subtree_pids, (subtree_count + 1) * sizeof(*subtree_pids));
-        if (!new_list)
-        {
-            free(subtree_pids);
-            closedir(dir);
-            die_perror("realloc");
-        }
-
-        subtree_pids = new_list;
-        subtree_pids[subtree_count++] = pid;
-    }
+    ProcList subtree_procs = {0};
+    if (collect_descendants(process_id, &subtree_procs) != 0)
+        die_perror("collect_descendants");
 
     long orphan_count = 0;
-    for (size_t i = 0; i < subtree_count; i++)
+    for (size_t i = 0; i < subtree_procs.count; i++)
     {
-        pid_t parent = -1;
-        if (read_ppid_from_proc(subtree_pids[i], &parent) != 0)
+        pid_t parent = subtree_procs.proc_items[i].ppid;
+        if (parent <= 0)
             continue;
 
         if (parent == process_id)
             continue;
 
-        if (parent == 1 || !pid_in_list(parent, subtree_pids, subtree_count))
+        if (parent == 1 || !proc_pid_in_list(parent, subtree_procs.proc_items, subtree_procs.count))
             orphan_count++;
     }
 
-    closedir(dir);
-    free(subtree_pids);
+    free_proc_list(&subtree_procs);
     printf("%ld\n", orphan_count);
+}
+
+/**
+ * -dtm：向 process_id 的所有后代发送 SIGKILL 信号，要求它们终止。要求按照 starttime 从晚到早的顺序发送信号（即先杀死 starttime 晚的进程），以尽量减少对系统的影响。
+ * 实现思路：
+ * 第一次遍历 /proc 中的每个 pid，对每个 pid 向上追父链，如果在追溯过程中遇到 process_id 就把这个 pid 的信息加入 descendants_out 中，并且这个 pid 不再继续追父链了
+ * 第二次对 descendants_out 进行排序，按照 starttime 从晚到早的顺序排序
+ * 第三次遍历排序后的 descendants_out，依次发送 SIGKILL 信号给每个 pid
+ */
+static void opt_dtm(pid_t process_id)
+{
+    ProcList descendants = {0};
+    if (collect_descendants(process_id, &descendants) != 0)
+        die_perror("collect_descendants");
+
+    if (descendants.count == 0)
+    {
+        free_proc_list(&descendants);
+        return;
+    }
+
+    qsort(descendants.proc_items, descendants.count, sizeof(*descendants.proc_items), cmp_proc_start_desc);
+
+    for (size_t i = 0; i < descendants.count; i++)
+    {
+        pid_t pid = descendants.proc_items[i].pid;
+        if (descendants.proc_items[i].is_bash)
+        {
+            fprintf(stderr, "Process %d is BASH and will not be terminated\n", pid);
+            continue;
+        }
+
+        if (kill(pid, SIGKILL) != 0)
+        {
+            if (errno == ESRCH)
+            {
+                fprintf(stderr, "Failed to terminate %d: %s\n", pid, strerror(errno));
+                continue;
+            }
+
+            fprintf(stderr, "Failed to kill %d: %s\n", (int)pid, strerror(errno));
+        }
+    }
+
+    free_proc_list(&descendants);
 }
 
 int main(int argc, char **argv)
@@ -441,7 +589,6 @@ int main(int argc, char **argv)
     }
     if (argc == 2 && strcmp(argv[1], "-bop") == 0)
     {
-        // count the overall number of processes in all open bash terminals(excluding the bash processes in the count)
         opt_bop();
         return 0;
     }
@@ -507,8 +654,8 @@ int main(int argc, char **argv)
         opt_cnt(process_id);
     else if (strcmp(opt, "-oct") == 0)
         opt_oct(process_id);
-    // else if (strcmp(opt, "-dtm") == 0)
-    //     opt_dtm(process_id, &pv, &cm);
+    else if (strcmp(opt, "-dtm") == 0)
+        opt_dtm(process_id);
     // else if (strcmp(opt, "-odt") == 0)
     //     opt_odt(process_id, &pv, &cm);
     // else if (strcmp(opt, "-ndt") == 0)
