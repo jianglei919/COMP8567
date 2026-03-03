@@ -321,6 +321,59 @@ static int collect_descendants(pid_t root_pid, ProcList *descendants_out)
     return 0;
 }
 
+/**
+ * 用途：从 /proc 中收集 process_id 的所有兄弟进程信息，保存在 siblings_out 中，并将兄弟数量保存在 siblings_count_out 中。
+ */
+static int collect_siblings(pid_t process_id, ProcList *siblings_out)
+{
+    if (!siblings_out)
+        return -1;
+
+    pid_t parent_pid = -1;
+    if (read_ppid_from_proc(process_id, &parent_pid) != 0 || parent_pid <= 0)
+        return -1;
+
+    DIR *dir = opendir("/proc");
+    if (!dir)
+        return -1;
+
+    ProcList siblings = {0};
+
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL)
+    {
+        if (!isdigit((unsigned char)entry->d_name[0]))
+            continue;
+
+        char *end = NULL;
+        long value = strtol(entry->d_name, &end, 10);
+        if (!end || *end != '\0' || value <= 0 || value > INT_MAX)
+            continue;
+
+        pid_t pid = (pid_t)value;
+        if (pid == process_id)
+            continue;
+
+        Proc proc;
+        if (read_proc_info(pid, &proc) != 0)
+            continue;
+
+        if (proc.ppid != parent_pid)
+            continue;
+
+        if (append_proc(&siblings, &proc) != 0)
+        {
+            free_proc_list(&siblings);
+            closedir(dir);
+            return -1;
+        }
+    }
+
+    closedir(dir);
+    *siblings_out = siblings;
+    return 0;
+}
+
 static int cmp_proc_start_desc(const void *a, const void *b)
 {
     const Proc *ea = (const Proc *)a;
@@ -755,40 +808,17 @@ static void opt_dnd(pid_t process_id)
  */
 static void opt_sst(pid_t process_id)
 {
-    pid_t parent_pid = -1;
-    if (read_ppid_from_proc(process_id, &parent_pid) != 0 || parent_pid <= 0)
+    ProcList siblings = {0};
+    if (collect_siblings(process_id, &siblings) != 0)
     {
-        fprintf(stderr, "Cannot determine parent process of %d\n", (int)process_id);
+        fprintf(stderr, "Cannot determine siblings of process %d\n", (int)process_id);
         return;
     }
 
-    DIR *dir = opendir("/proc");
-    if (!dir)
-        die_perror("opendir /proc");
-
-    struct dirent *entry;
-    while ((entry = readdir(dir)) != NULL)
+    for (size_t i = 0; i < siblings.count; i++)
     {
-        if (!isdigit((unsigned char)entry->d_name[0]))
-            continue;
-
-        char *end = NULL;
-        long value = strtol(entry->d_name, &end, 10);
-        if (!end || *end != '\0' || value <= 0 || value > INT_MAX)
-            continue;
-
-        pid_t pid = (pid_t)value;
-        if (pid == process_id)
-            continue;
-
-        Proc proc;
-        if (read_proc_info(pid, &proc) != 0)
-            continue;
-
-        if (proc.ppid != parent_pid)
-            continue;
-
-        if (proc.is_bash)
+        pid_t pid = siblings.proc_items[i].pid;
+        if (siblings.proc_items[i].is_bash)
         {
             fprintf(stderr, "Process %d is BASH and will not be stopped\n", (int)pid);
             continue;
@@ -803,7 +833,48 @@ static void opt_sst(pid_t process_id)
         }
     }
 
-    closedir(dir);
+    free_proc_list(&siblings);
+}
+
+/**
+ * -sco：向 process_id 的所有后代发送 SIGCONT 信号，要求它们继续。要求不继续 bash 进程（即使 bash 进程是 process_id 的后代），以免影响用户的正常操作。
+ * 实现思路：
+ * 1. 先读取 process_id 的父进程 PPID
+ * 2. 扫描 proc 找到 siblings（同 PPID、排除自己）
+ * 3. 仅对状态为 T（stopped）的 sibling 发送 SIGCONT
+ */
+static void opt_sco(pid_t process_id)
+{
+    ProcList siblings = {0};
+    if (collect_siblings(process_id, &siblings) != 0)
+    {
+        fprintf(stderr, "Cannot determine siblings of process %d\n", (int)process_id);
+        return;
+    }
+
+    for (size_t i = 0; i < siblings.count; i++)
+    {
+        pid_t pid = siblings.proc_items[i].pid;
+
+        if (siblings.proc_items[i].is_bash)
+        {
+            fprintf(stderr, "Process %d is BASH and will not be continued\n", (int)pid);
+            continue;
+        }
+
+        if (siblings.proc_items[i].state != 'T')
+            continue;
+
+        if (kill(pid, SIGCONT) != 0)
+        {
+            if (errno == ESRCH)
+                continue;
+
+            fprintf(stderr, "Failed to continue %d: %s\n", (int)pid, strerror(errno));
+        }
+    }
+
+    free_proc_list(&siblings);
 }
 
 int main(int argc, char **argv)
@@ -891,8 +962,8 @@ int main(int argc, char **argv)
         opt_dnd(process_id);
     else if (strcmp(opt, "-sst") == 0)
         opt_sst(process_id);
-    // else if (strcmp(opt, "-sco") == 0)
-    //     opt_sco(process_id, &pv, &cm);
+    else if (strcmp(opt, "-sco") == 0)
+        opt_sco(process_id);
     // else if (strcmp(opt, "-kgp") == 0)
     //     opt_kgp(process_id, &pv);
     // else if (strcmp(opt, "-kpp") == 0)
