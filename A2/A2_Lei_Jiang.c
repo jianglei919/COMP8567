@@ -722,8 +722,10 @@ static void opt_ndt(pid_t process_id)
 /**
  * -dnd：统计 process_id 的后代中已经死亡的数量（即状态是 Z 的进程数量）。
  * 实现思路：
- * 第一次遍历 /proc 中的每个 pid，对每个 pid 向上追父链，如果在追溯过程中遇到 process_id 就把这个 pid 的信息加入 descendants_out 中，并且这个 pid 不再继续追父链了
- * 第二次遍历 descendants_out，统计状态是 Z 的进程数量
+ * 1. 用 collect_descendants(process_id, &descendants) 拿到所有后代
+ * 2. 统计直接子进程数（ppid == process_id）
+ * 3. 计算非直接后代数：descendants.count - direct_children_count
+ * 4. 输出该数量
  */
 static void opt_dnd(pid_t process_id)
 {
@@ -742,6 +744,66 @@ static void opt_dnd(pid_t process_id)
     printf("%zu\n", non_direct_count);
 
     free_proc_list(&descendants);
+}
+
+/**
+ * -sst：向 process_id 的所有后代发送 SIGSTOP 信号，要求它们暂停。要求不暂停 bash 进程（即使 bash 进程是 process_id 的后代），以免影响用户的正常操作。
+ * 实现思路：
+ * 1. 先读取 process_id 的父进程 PPID
+ * 2. 扫描 proc 找所有同 PPID 的 sibling（排除自己）
+ * 3. 对每个 sibling 发送 SIGSTOP
+ */
+static void opt_sst(pid_t process_id)
+{
+    pid_t parent_pid = -1;
+    if (read_ppid_from_proc(process_id, &parent_pid) != 0 || parent_pid <= 0)
+    {
+        fprintf(stderr, "Cannot determine parent process of %d\n", (int)process_id);
+        return;
+    }
+
+    DIR *dir = opendir("/proc");
+    if (!dir)
+        die_perror("opendir /proc");
+
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL)
+    {
+        if (!isdigit((unsigned char)entry->d_name[0]))
+            continue;
+
+        char *end = NULL;
+        long value = strtol(entry->d_name, &end, 10);
+        if (!end || *end != '\0' || value <= 0 || value > INT_MAX)
+            continue;
+
+        pid_t pid = (pid_t)value;
+        if (pid == process_id)
+            continue;
+
+        Proc proc;
+        if (read_proc_info(pid, &proc) != 0)
+            continue;
+
+        if (proc.ppid != parent_pid)
+            continue;
+
+        if (proc.is_bash)
+        {
+            fprintf(stderr, "Process %d is BASH and will not be stopped\n", (int)pid);
+            continue;
+        }
+
+        if (kill(pid, SIGSTOP) != 0)
+        {
+            if (errno == ESRCH)
+                continue;
+
+            fprintf(stderr, "Failed to stop %d: %s\n", (int)pid, strerror(errno));
+        }
+    }
+
+    closedir(dir);
 }
 
 int main(int argc, char **argv)
@@ -827,8 +889,8 @@ int main(int argc, char **argv)
         opt_ndt(process_id);
     else if (strcmp(opt, "-dnd") == 0)
         opt_dnd(process_id);
-    // else if (strcmp(opt, "-sst") == 0)
-    //     opt_sst(process_id, &pv, &cm);
+    else if (strcmp(opt, "-sst") == 0)
+        opt_sst(process_id);
     // else if (strcmp(opt, "-sco") == 0)
     //     opt_sco(process_id, &pv, &cm);
     // else if (strcmp(opt, "-kgp") == 0)
