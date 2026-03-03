@@ -719,6 +719,31 @@ static void opt_ndt(pid_t process_id)
     free_proc_list(&descendants);
 }
 
+/**
+ * -dnd：统计 process_id 的后代中已经死亡的数量（即状态是 Z 的进程数量）。
+ * 实现思路：
+ * 第一次遍历 /proc 中的每个 pid，对每个 pid 向上追父链，如果在追溯过程中遇到 process_id 就把这个 pid 的信息加入 descendants_out 中，并且这个 pid 不再继续追父链了
+ * 第二次遍历 descendants_out，统计状态是 Z 的进程数量
+ */
+static void opt_dnd(pid_t process_id)
+{
+    ProcList descendants = {0};
+    if (collect_descendants(process_id, &descendants) != 0)
+        die_perror("collect_descendants");
+
+    size_t direct_children_count = 0;
+    for (size_t i = 0; i < descendants.count; i++)
+    {
+        if (descendants.proc_items[i].ppid == process_id)
+            direct_children_count++;
+    }
+
+    size_t non_direct_count = descendants.count - direct_children_count;
+    printf("%zu\n", non_direct_count);
+
+    free_proc_list(&descendants);
+}
+
 int main(int argc, char **argv)
 {
 
@@ -800,8 +825,8 @@ int main(int argc, char **argv)
         opt_odt(process_id);
     else if (strcmp(opt, "-ndt") == 0)
         opt_ndt(process_id);
-    // else if (strcmp(opt, "-dnd") == 0)
-    //     opt_dnd(process_id, &cm);
+    else if (strcmp(opt, "-dnd") == 0)
+        opt_dnd(process_id);
     // else if (strcmp(opt, "-sst") == 0)
     //     opt_sst(process_id, &pv, &cm);
     // else if (strcmp(opt, "-sco") == 0)
