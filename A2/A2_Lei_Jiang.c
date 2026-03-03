@@ -18,6 +18,20 @@ static void die_perror(const char *msg)
     exit(EXIT_FAILURE);
 }
 
+static void usage(const char *prog)
+{
+    fprintf(stderr,
+            "Usage:\n"
+            "  %s root_process process_id [Option]\n"
+            "  %s -bcp\n"
+            "  %s -bop\n"
+            "Options:\n"
+            "  -cnt -oct -dtm -odt -ndt -dnd -sst -sco\n"
+            "  -kgp -kpp -ksp -kps -kgc -kcp -krp\n"
+            "  -mmd -mpd\n",
+            prog, prog, prog);
+}
+
 /* 用途：保存单个进程从 /proc 读取到的核心信息。 */
 typedef struct Proc
 {
@@ -208,7 +222,6 @@ static void opt_bop()
         if (!is_bash_process(pid))
             continue;
 
-        printf("Found bash process: %d\n", (int)pid);
         pid_t *new_list = realloc(bash_pids, (bash_count + 1) * sizeof(*bash_pids));
         if (!new_list)
         {
@@ -340,18 +353,82 @@ static void opt_cnt(pid_t process_id)
     printf("%ld\n", count);
 }
 
-static void usage(const char *prog)
+static void opt_oct(pid_t process_id)
 {
-    fprintf(stderr,
-            "Usage:\n"
-            "  %s root_process process_id [Option]\n"
-            "  %s -bcp\n"
-            "  %s -bop\n"
-            "Options:\n"
-            "  -cnt -oct -dtm -odt -ndt -dnd -sst -sco\n"
-            "  -kgp -kpp -ksp -kps -kgc -kcp -krp\n"
-            "  -mmd -mpd\n",
-            prog, prog, prog);
+    DIR *dir = opendir("/proc");
+    if (!dir)
+        die_perror("opendir /proc");
+
+    pid_t *subtree_pids = NULL;
+    size_t subtree_count = 0;
+
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL)
+    {
+        if (!isdigit((unsigned char)entry->d_name[0]))
+            continue;
+
+        char *end = NULL;
+        long value = strtol(entry->d_name, &end, 10);
+        if (!end || *end != '\0' || value <= 0 || value > INT_MAX)
+            continue;
+
+        pid_t pid = (pid_t)value;
+        if (pid == process_id)
+            continue;
+
+        pid_t current = pid;
+        int in_subtree = 0;
+        while (current > 0)
+        {
+            pid_t parent = -1;
+            if (read_ppid_from_proc(current, &parent) != 0)
+                break;
+
+            if (parent == process_id)
+            {
+                in_subtree = 1;
+                break;
+            }
+
+            if (parent <= 1 || parent == current)
+                break;
+
+            current = parent;
+        }
+
+        if (!in_subtree)
+            continue;
+
+        pid_t *new_list = realloc(subtree_pids, (subtree_count + 1) * sizeof(*subtree_pids));
+        if (!new_list)
+        {
+            free(subtree_pids);
+            closedir(dir);
+            die_perror("realloc");
+        }
+
+        subtree_pids = new_list;
+        subtree_pids[subtree_count++] = pid;
+    }
+
+    long orphan_count = 0;
+    for (size_t i = 0; i < subtree_count; i++)
+    {
+        pid_t parent = -1;
+        if (read_ppid_from_proc(subtree_pids[i], &parent) != 0)
+            continue;
+
+        if (parent == process_id)
+            continue;
+
+        if (parent == 1 || !pid_in_list(parent, subtree_pids, subtree_count))
+            orphan_count++;
+    }
+
+    closedir(dir);
+    free(subtree_pids);
+    printf("%ld\n", orphan_count);
 }
 
 int main(int argc, char **argv)
@@ -428,8 +505,8 @@ int main(int argc, char **argv)
 
     if (strcmp(opt, "-cnt") == 0)
         opt_cnt(process_id);
-    // else if (strcmp(opt, "-oct") == 0)
-    //     opt_oct(process_id, &pv, &cm);
+    else if (strcmp(opt, "-oct") == 0)
+        opt_oct(process_id);
     // else if (strcmp(opt, "-dtm") == 0)
     //     opt_dtm(process_id, &pv, &cm);
     // else if (strcmp(opt, "-odt") == 0)
