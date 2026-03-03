@@ -675,6 +675,50 @@ static void opt_odt(pid_t process_id)
     free_proc_list(&descendants);
 }
 
+/**
+ * -ndt：找到 process_id 的所有后代中最新创建的那个进程（即 starttime 最大的那个进程），输出它的 PID。 如果有多个后代的 starttime 一样，则选择 PID 最小的那个。
+ * 实现思路：
+ * 第一次遍历 /proc 中的每个 pid，对每个 pid 向上追父链，如果在追溯过程中遇到 process_id 就把这个 pid 的信息加入 descendants_out 中，并且这个 pid 不再继续追父链了
+ * 第二次遍历 descendants_out，找到 starttime 最大的那个进程，如果有多个后代的 starttime 一样，则选择 PID 最小的那个
+ * 第三次输出找到的进程的 PID
+ */
+static void opt_ndt(pid_t process_id)
+{
+    ProcList descendants = {0};
+    if (collect_descendants(process_id, &descendants) != 0)
+        die_perror("collect_descendants");
+
+    if (descendants.count == 0)
+    {
+        free_proc_list(&descendants);
+        return;
+    }
+
+    size_t newest_idx = (size_t)-1;
+    for (size_t i = 0; i < descendants.count; i++)
+    {
+        if (descendants.proc_items[i].start_ticks < 0)
+            continue;
+
+        if (newest_idx == (size_t)-1)
+        {
+            newest_idx = i;
+            continue;
+        }
+
+        if (descendants.proc_items[i].start_ticks > descendants.proc_items[newest_idx].start_ticks)
+            newest_idx = i;
+        else if (descendants.proc_items[i].start_ticks == descendants.proc_items[newest_idx].start_ticks &&
+                 descendants.proc_items[i].pid < descendants.proc_items[newest_idx].pid)
+            newest_idx = i;
+    }
+
+    if (newest_idx != (size_t)-1)
+        printf("%d\n", (int)descendants.proc_items[newest_idx].pid);
+
+    free_proc_list(&descendants);
+}
+
 int main(int argc, char **argv)
 {
 
@@ -754,8 +798,8 @@ int main(int argc, char **argv)
         opt_dtm(process_id);
     else if (strcmp(opt, "-odt") == 0)
         opt_odt(process_id);
-    // else if (strcmp(opt, "-ndt") == 0)
-    //     opt_ndt(process_id, &pv, &cm);
+    else if (strcmp(opt, "-ndt") == 0)
+        opt_ndt(process_id);
     // else if (strcmp(opt, "-dnd") == 0)
     //     opt_dnd(process_id, &cm);
     // else if (strcmp(opt, "-sst") == 0)
