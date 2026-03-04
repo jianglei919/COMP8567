@@ -597,10 +597,12 @@ static void opt_cnt(pid_t process_id)
 }
 
 /**
- * -oct：统计 process_id 的后代中已经成为孤儿的数量（即父进程已经不在 process_id 的子树中，或者父进程是 init 进程）。
+ * -oct：统计 process_id 的后代中孤儿进程的数量。
  * 实现思路：
- * 第一次遍历 /proc 中的每个 pid，对每个 pid 向上追父链，如果在追溯过程中遇到 process_id 就把这个 pid 加入到一个列表中
- * 第二次遍历这个列表，对每个 pid 向上追父链，如果在追溯过程中没有遇到 process_id 就说明这个 pid 已经成为孤儿了，计数 +1
+ * 1. 用 collect_descendants(process_id, &subtree_procs) 收集所有后代
+ * 2. 遍历每个后代，读取其当前父进程 pid
+ * 3. 排除直接子进程（parent == process_id）
+ * 4. 若父进程是 1，或父进程已不在该后代集合中，则计为孤儿并累加
  */
 static void opt_oct(pid_t process_id)
 {
@@ -627,11 +629,12 @@ static void opt_oct(pid_t process_id)
 }
 
 /**
- * -dtm：向 process_id 的所有后代发送 SIGKILL 信号，要求它们终止。要求按照 starttime 从晚到早的顺序发送信号（即先杀死 starttime 晚的进程），以尽量减少对系统的影响。
+ * -dtm：向 process_id 的所有后代发送 SIGKILL 信号并终止，按创建时间从晚到早执行。
  * 实现思路：
- * 第一次遍历 /proc 中的每个 pid，对每个 pid 向上追父链，如果在追溯过程中遇到 process_id 就把这个 pid 的信息加入 descendants_out 中，并且这个 pid 不再继续追父链了
- * 第二次对 descendants_out 进行排序，按照 starttime 从晚到早的顺序排序
- * 第三次遍历排序后的 descendants_out，依次发送 SIGKILL 信号给每个 pid
+ * 1. 用 collect_descendants(process_id, &descendants) 收集所有后代
+ * 2. 使用 qsort 按 starttime 降序排序（晚创建的先处理）
+ * 3. 依次向每个后代发送 SIGKILL
+ * 4. 跳过 bash 进程，ESRCH 忽略，其它错误打印提示
  */
 static void opt_dtm(pid_t process_id)
 {
@@ -672,11 +675,12 @@ static void opt_dtm(pid_t process_id)
 }
 
 /**
- * -odt：找到 process_id 的所有后代中最早创建的那个进程（即 starttime 最小的那个进程），输出它的 PID 和创建时间（格式为 "Wed 01 Jan 2020 12:00:00 PM UTC"）。如果有多个后代的 starttime 一样，则选择 PID 最小的那个。
+ * -odt：找出 process_id 后代中最早创建的进程并输出其 PID 与创建时间。
  * 实现思路：
- * 第一次遍历 /proc 中的每个 pid，对每个 pid 向上追父链，如果在追溯过程中遇到 process_id 就把这个 pid 的信息加入 descendants_out 中，并且这个 pid 不再继续追父链了
- * 第二次遍历 descendants_out，找到 starttime 最小的那个进程，如果有多个后代的 starttime 一样，则选择 PID 最小的那个
- * 第三次根据找到的进程的 starttime 和系统启动时间计算出这个进程的创建时间，并按照指定格式输出
+ * 1. 用 collect_descendants(process_id, &descendants) 收集所有后代
+ * 2. 遍历找到 start_ticks 最小的后代；若并列则取 PID 更小者
+ * 3. 结合系统 btime 与时钟频率将 start_ticks 转换为可读时间字符串
+ * 4. 按指定格式输出最老后代 PID 与创建时间
  */
 static void opt_odt(pid_t process_id)
 {
@@ -737,11 +741,11 @@ static void opt_odt(pid_t process_id)
 }
 
 /**
- * -ndt：找到 process_id 的所有后代中最新创建的那个进程（即 starttime 最大的那个进程），输出它的 PID。 如果有多个后代的 starttime 一样，则选择 PID 最小的那个。
+ * -ndt：找出 process_id 后代中最新创建的进程并输出其 PID。
  * 实现思路：
- * 第一次遍历 /proc 中的每个 pid，对每个 pid 向上追父链，如果在追溯过程中遇到 process_id 就把这个 pid 的信息加入 descendants_out 中，并且这个 pid 不再继续追父链了
- * 第二次遍历 descendants_out，找到 starttime 最大的那个进程，如果有多个后代的 starttime 一样，则选择 PID 最小的那个
- * 第三次输出找到的进程的 PID
+ * 1. 用 collect_descendants(process_id, &descendants) 收集所有后代
+ * 2. 遍历找到 start_ticks 最大的后代；若并列则取 PID 更小者
+ * 3. 输出该后代 PID
  */
 static void opt_ndt(pid_t process_id)
 {
