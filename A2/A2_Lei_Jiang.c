@@ -442,11 +442,11 @@ static pid_t find_current_bash_ancestor(void)
 }
 
 /**
- * 向上查父链，判断是否属于 bash 子树
- *
- * 先遍历系统里每个进程 pid
- * 对每个 pid 向上追 PPid 链
- * 只要在追溯过程中遇到 bash_pid，这个 pid 就属于 bash 子树，计数 +1
+ * -bcp：统计当前 bash 终端（当前 shell 对应的 bash）子树中的进程总数（不含该 bash 本身）。
+ * 实现思路：
+ * 1. 先通过 find_current_bash_ancestor() 找到当前 bash 进程 PID
+ * 2. 使用 collect_descendants(bash_pid, &descendants) 收集其全部后代
+ * 3. 输出后代数量 descendants.count
  */
 static void opt_bcp()
 {
@@ -466,11 +466,12 @@ static void opt_bcp()
 }
 
 /**
- * 统计所有打开的 bash 终端（不包括 bash 进程本身）中进程的总数
- *
- * 第一次遍历 proc：收集所有 bash 的 PID
- * 第二次遍历 proc：对每个非 bash 进程向上追父链，只要遇到一个 bash_pid 就计数 +1，并且这个进程不再继续追父链了
- *
+ * -bop：统计所有打开的 bash 终端子树中的进程总数（去重，不含 bash 进程本身）。
+ * 实现思路：
+ * 1. 遍历 /proc，收集所有 bash 进程 PID
+ * 2. 对每个 bash PID 调用 collect_descendants 收集后代进程
+ * 3. 将后代 PID 合并到全局列表并去重
+ * 4. 输出去重后的总数量
  */
 static void opt_bop()
 {
@@ -547,6 +548,13 @@ static void opt_bop()
     free(bash_pids);
 }
 
+/**
+ * 默认功能（无选项）：判断 process_id 是否属于以 root_process 为根的子树。
+ * 实现思路：
+ * 1. 从 process_id 出发沿父链向上回溯
+ * 2. 若回溯过程中遇到 root_process，则输出 "process_id root_process"
+ * 3. 若未遇到 root_process，则输出不属于该子树的提示信息并返回失败
+ */
 static int opt_default(pid_t process_id, pid_t root_process)
 {
     pid_t current = process_id;
@@ -773,7 +781,7 @@ static void opt_ndt(pid_t process_id)
 }
 
 /**
- * -dnd：统计 process_id 的后代中已经死亡的数量（即状态是 Z 的进程数量）。
+ * -dnd：统计 process_id 的非直接后代数量（即后代总数减去直接子进程数）。
  * 实现思路：
  * 1. 用 collect_descendants(process_id, &descendants) 拿到所有后代
  * 2. 统计直接子进程数（ppid == process_id）
@@ -800,11 +808,11 @@ static void opt_dnd(pid_t process_id)
 }
 
 /**
- * -sst：向 process_id 的所有后代发送 SIGSTOP 信号，要求它们暂停。要求不暂停 bash 进程（即使 bash 进程是 process_id 的后代），以免影响用户的正常操作。
+ * -sst：向 process_id 的所有兄弟进程发送 SIGSTOP 信号，要求它们暂停。
  * 实现思路：
- * 1. 先读取 process_id 的父进程 PPID
- * 2. 扫描 proc 找所有同 PPID 的 sibling（排除自己）
- * 3. 对每个 sibling 发送 SIGSTOP
+ * 1. 复用 collect_siblings(process_id, &siblings) 收集兄弟进程
+ * 2. 跳过 bash 进程，避免影响用户 shell
+ * 3. 对其余兄弟进程发送 SIGSTOP
  */
 static void opt_sst(pid_t process_id)
 {
@@ -837,11 +845,11 @@ static void opt_sst(pid_t process_id)
 }
 
 /**
- * -sco：向 process_id 的所有后代发送 SIGCONT 信号，要求它们继续。要求不继续 bash 进程（即使 bash 进程是 process_id 的后代），以免影响用户的正常操作。
+ * -sco：向 process_id 的所有已暂停兄弟进程发送 SIGCONT 信号，要求它们继续执行。
  * 实现思路：
- * 1. 先读取 process_id 的父进程 PPID
- * 2. 扫描 proc 找到 siblings（同 PPID、排除自己）
- * 3. 仅对状态为 T（stopped）的 sibling 发送 SIGCONT
+ * 1. 复用 collect_siblings(process_id, &siblings) 收集兄弟进程
+ * 2. 跳过 bash 进程，避免影响用户 shell
+ * 3. 仅对状态为 T（stopped）的兄弟进程发送 SIGCONT
  */
 static void opt_sco(pid_t process_id)
 {
@@ -878,12 +886,12 @@ static void opt_sco(pid_t process_id)
 }
 
 /**
- * -kgp：向 process_id 的父进程发送 SIGKILL 信号，要求它终止。要求不杀死 bash 进程（即使 bash 进程是 process_id 的父进程），以免影响用户的正常操作。
+ * -kgp：向 process_id 的祖父进程发送 SIGKILL 信号，要求它终止。要求不杀死 bash 进程，以免影响用户的正常操作。
  * 实现思路：
  * 1. 先读取 process_id 的父进程 PPID，记为 parent_pid
  * 2. 再读取 parent_pid 的父进程 PPID，记为 grandparent_pid
- * 3. 如果 grandparent_pid 不存在或者不大于 1，就说明 parent_pid 没有父进程或者父进程是 init 进程了，这时不杀死 parent_pid
- * 4. 如果 grandparent_pid 是 bash 进程，就不杀死 parent_pid
+ * 3. 如果 grandparent_pid 不存在或者不大于 1，则不执行终止
+ * 4. 如果 grandparent_pid 是 bash 进程，则不执行终止
  * 5. 否则，向 grandparent_pid 发送 SIGKILL 信号
  */
 static void opt_kgp(pid_t process_id)
@@ -930,7 +938,7 @@ static void opt_kgp(pid_t process_id)
 }
 
 /**
- * -kgp：向 process_id 的父进程发送 SIGKILL 信号，要求它终止。要求不杀死 bash 进程（即使 bash 进程是 process_id 的父进程），以免影响用户的正常操作。
+ * -kpp：向 process_id 的父进程发送 SIGKILL 信号，要求它终止。要求不杀死 bash 进程，以免影响用户的正常操作。
  * 实现思路：
  * 1. 先读取 process_id 的父进程 PPID，记为 parent_pid
  * 2. 如果 parent_pid 不存在或者不大于 1，就说明 process_id 没有父进程或者父进程是 init 进程了，这时不杀死 parent_pid
@@ -974,7 +982,7 @@ static void opt_kpp(pid_t process_id)
 }
 
 /**
- * -kgp：向 process_id 的所有兄弟进程发送 SIGKILL 信号，要求它们终止。要求不杀死 bash 进程（即使 bash 进程是 process_id 的兄弟进程），以免影响用户的正常操作。
+ * -ksp：向 process_id 的所有兄弟进程发送 SIGKILL 信号，要求它们终止。要求不杀死 bash 进程，以免影响用户的正常操作。
  * 实现思路：
  * 1. 复用 collect_siblings(process_id, &siblings) 收集兄弟进程
  * 2. 对每个 sibling 发送 SIGKILL
@@ -1013,7 +1021,7 @@ static void opt_ksp(pid_t process_id)
 }
 
 /**
- * -kgp：向 process_id 的父进程的所有兄弟进程发送 SIGKILL 信号，要求它们终止。要求不杀死 bash 进程（即使 bash 进程是 process_id 的兄弟进程），以免影响用户的正常操作。
+ * -kps：向 process_id 的父进程的所有兄弟进程发送 SIGKILL 信号，要求它们终止。要求不杀死 bash 进程，以免影响用户的正常操作。
  * 实现思路：
  * 1. 先读取 process_id 的父进程 parent_pid
  * 2. 复用 collect_siblings(parent_pid, &parent_siblings) 获取“父进程的 siblings（叔伯）”
