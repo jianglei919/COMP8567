@@ -1057,6 +1057,105 @@ static void opt_kps(pid_t process_id)
     free_proc_list(&parent_siblings);
 }
 
+/**
+ * -kgc：向 process_id 的所有孙子进程发送 SIGKILL 信号，要求它们终止。要求不杀死 bash 进程（即使 bash 进程是 process_id 的子进程），以免影响用户的正常操作。
+ * 实现思路：
+ * 1. 先用 collect_descendants(process_id, &descendants) 收集后代
+ * 2. 识别直接子进程（ppid == process_id）
+ * 3. 再筛选并终止这些子进程的直接子进程（即 grandchildren）
+ */
+static void opt_kgc(pid_t process_id)
+{
+    ProcList descendants = {0};
+    if (collect_descendants(process_id, &descendants) != 0)
+    {
+        fprintf(stderr, "Cannot collect descendants of process %d\n", (int)process_id);
+        return;
+    }
+
+    pid_t *child_pids = NULL;
+    size_t child_count = 0;
+
+    for (size_t i = 0; i < descendants.count; i++)
+    {
+        if (descendants.proc_items[i].ppid == process_id)
+        {
+            if (append_pid(&child_pids, &child_count, descendants.proc_items[i].pid) != 0)
+            {
+                free(child_pids);
+                free_proc_list(&descendants);
+                die_perror("realloc");
+            }
+        }
+    }
+
+    for (size_t i = 0; i < descendants.count; i++)
+    {
+        Proc *proc = &descendants.proc_items[i];
+
+        if (!pid_in_list(proc->ppid, child_pids, child_count))
+            continue;
+
+        if (proc->is_bash)
+        {
+            fprintf(stderr, "Process %d is BASH and will not be terminated\n", (int)proc->pid);
+            continue;
+        }
+
+        if (kill(proc->pid, SIGKILL) != 0)
+        {
+            if (errno == ESRCH)
+                continue;
+
+            fprintf(stderr, "Failed to kill grandchild %d: %s\n", (int)proc->pid, strerror(errno));
+        }
+    }
+
+    free(child_pids);
+    free_proc_list(&descendants);
+}
+
+/**
+ * -kcp：向 process_id 的所有子进程发送 SIGKILL 信号，要求它们终止。要求不杀死 bash 进程（即使 bash 进程是 process_id 的子进程），以免影响用户的正常操作。
+ * 实现思路：
+ * 1. 先用 collect_descendants(process_id, &descendants) 收集后代
+ * 2. 识别直接子进程（ppid == process_id）
+ * 3. 对这些直接子进程发送 SIGKILL
+ */
+static void opt_kcp(pid_t process_id)
+{
+    ProcList descendants = {0};
+    if (collect_descendants(process_id, &descendants) != 0)
+    {
+        fprintf(stderr, "Cannot collect descendants of process %d\n", (int)process_id);
+        return;
+    }
+
+    for (size_t i = 0; i < descendants.count; i++)
+    {
+        Proc *proc = &descendants.proc_items[i];
+
+        if (proc->ppid != process_id)
+            continue;
+
+        if (proc->is_bash)
+        {
+            fprintf(stderr, "Process %d is BASH and will not be terminated\n", (int)proc->pid);
+            continue;
+        }
+
+        if (kill(proc->pid, SIGKILL) != 0)
+        {
+            if (errno == ESRCH)
+                continue;
+
+            fprintf(stderr, "Failed to kill child %d: %s\n", (int)proc->pid, strerror(errno));
+        }
+    }
+
+    free_proc_list(&descendants);
+}
+
 int main(int argc, char **argv)
 {
 
@@ -1152,10 +1251,10 @@ int main(int argc, char **argv)
         opt_ksp(process_id);
     else if (strcmp(opt, "-kps") == 0)
         opt_kps(process_id);
-    // else if (strcmp(opt, "-kgc") == 0)
-    //     opt_kgc(process_id, &pv, &cm);
-    // else if (strcmp(opt, "-kcp") == 0)
-    //     opt_kcp(process_id, &pv, &cm);
+    else if (strcmp(opt, "-kgc") == 0)
+        opt_kgc(process_id);
+    else if (strcmp(opt, "-kcp") == 0)
+        opt_kcp(process_id);
     // else if (strcmp(opt, "-krp") == 0)
     //     opt_krp(root_process, &pv);
     // else if (strcmp(opt, "-mmd") == 0)
