@@ -973,6 +973,45 @@ static void opt_kpp(pid_t process_id)
     printf("SIGKILL was sent to process %d\n", (int)parent_pid);
 }
 
+/**
+ * -kgp：向 process_id 的所有兄弟进程发送 SIGKILL 信号，要求它们终止。要求不杀死 bash 进程（即使 bash 进程是 process_id 的兄弟进程），以免影响用户的正常操作。
+ * 实现思路：
+ * 1. 复用 collect_siblings(process_id, &siblings) 收集兄弟进程
+ * 2. 对每个 sibling 发送 SIGKILL
+ * 3. 遵守保护规则：bash sibling 不终止并提示
+ * 4. 错误处理：ESRCH 忽略，其它错误打印原因
+ */
+static void opt_ksp(pid_t process_id)
+{
+    ProcList siblings = {0};
+    if (collect_siblings(process_id, &siblings) != 0)
+    {
+        fprintf(stderr, "Cannot determine siblings of process %d\n", (int)process_id);
+        return;
+    }
+
+    for (size_t i = 0; i < siblings.count; i++)
+    {
+        pid_t pid = siblings.proc_items[i].pid;
+
+        if (siblings.proc_items[i].is_bash)
+        {
+            fprintf(stderr, "Process %d is BASH and will not be terminated\n", (int)pid);
+            continue;
+        }
+
+        if (kill(pid, SIGKILL) != 0)
+        {
+            if (errno == ESRCH)
+                continue;
+
+            fprintf(stderr, "Failed to kill sibling %d: %s\n", (int)pid, strerror(errno));
+        }
+    }
+
+    free_proc_list(&siblings);
+}
+
 int main(int argc, char **argv)
 {
 
@@ -1064,8 +1103,8 @@ int main(int argc, char **argv)
         opt_kgp(process_id);
     else if (strcmp(opt, "-kpp") == 0)
         opt_kpp(process_id);
-    // else if (strcmp(opt, "-ksp") == 0)
-    //     opt_ksp(process_id, &pv, &cm);
+    else if (strcmp(opt, "-ksp") == 0)
+        opt_ksp(process_id);
     // else if (strcmp(opt, "-kps") == 0)
     //     opt_kps(process_id, &pv, &cm);
     // else if (strcmp(opt, "-kgc") == 0)
