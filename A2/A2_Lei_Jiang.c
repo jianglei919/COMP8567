@@ -459,7 +459,10 @@ static void opt_bcp()
 
     ProcList descendants = {0};
     if (collect_descendants(bash_pid, &descendants) != 0)
-        die_perror("collect_descendants");
+    {
+        fprintf(stderr, "Cannot collect descendants of bash process %d\n", (int)bash_pid);
+        return;
+    }
 
     printf("%zu\n", descendants.count);
     free_proc_list(&descendants);
@@ -519,10 +522,12 @@ static void opt_bop()
         ProcList descendants = {0};
         if (collect_descendants(bash_pids[i], &descendants) != 0)
         {
+            pid_t failed_bash_pid = bash_pids[i];
             free_proc_list(&descendants);
             free(all_pids);
             free(bash_pids);
-            die_perror("collect_descendants");
+            fprintf(stderr, "Cannot collect descendants of bash process %d\n", (int)failed_bash_pid);
+            return;
         }
 
         for (size_t j = 0; j < descendants.count; j++)
@@ -590,7 +595,10 @@ static void opt_cnt(pid_t process_id)
 {
     ProcList descendants = {0};
     if (collect_descendants(process_id, &descendants) != 0)
-        die_perror("collect_descendants");
+    {
+        fprintf(stderr, "Cannot collect descendants of process %d\n", (int)process_id);
+        return;
+    }
 
     printf("%zu\n", descendants.count);
     free_proc_list(&descendants);
@@ -608,7 +616,10 @@ static void opt_oct(pid_t process_id)
 {
     ProcList subtree_procs = {0};
     if (collect_descendants(process_id, &subtree_procs) != 0)
-        die_perror("collect_descendants");
+    {
+        fprintf(stderr, "Cannot collect descendants of process %d\n", (int)process_id);
+        return;
+    }
 
     long orphan_count = 0;
     for (size_t i = 0; i < subtree_procs.count; i++)
@@ -640,7 +651,10 @@ static void opt_dtm(pid_t process_id)
 {
     ProcList descendants = {0};
     if (collect_descendants(process_id, &descendants) != 0)
-        die_perror("collect_descendants");
+    {
+        fprintf(stderr, "Cannot collect descendants of process %d\n", (int)process_id);
+        return;
+    }
 
     if (descendants.count == 0)
     {
@@ -686,7 +700,10 @@ static void opt_odt(pid_t process_id)
 {
     ProcList descendants = {0};
     if (collect_descendants(process_id, &descendants) != 0)
-        die_perror("collect_descendants");
+    {
+        fprintf(stderr, "Cannot collect descendants of process %d\n", (int)process_id);
+        return;
+    }
 
     if (descendants.count == 0)
     {
@@ -751,7 +768,10 @@ static void opt_ndt(pid_t process_id)
 {
     ProcList descendants = {0};
     if (collect_descendants(process_id, &descendants) != 0)
-        die_perror("collect_descendants");
+    {
+        fprintf(stderr, "Cannot collect descendants of process %d\n", (int)process_id);
+        return;
+    }
 
     if (descendants.count == 0)
     {
@@ -796,7 +816,10 @@ static void opt_dnd(pid_t process_id)
 {
     ProcList descendants = {0};
     if (collect_descendants(process_id, &descendants) != 0)
-        die_perror("collect_descendants");
+    {
+        fprintf(stderr, "Cannot collect descendants of process %d\n", (int)process_id);
+        return;
+    }
 
     size_t direct_children_count = 0;
     for (size_t i = 0; i < descendants.count; i++)
@@ -1216,7 +1239,10 @@ static void opt_mmd(pid_t process_id)
 {
     ProcList descendants = {0};
     if (collect_descendants(process_id, &descendants) != 0)
-        die_perror("collect_descendants");
+    {
+        fprintf(stderr, "Cannot collect descendants of process %d\n", (int)process_id);
+        return;
+    }
 
     if (descendants.count == 0)
     {
@@ -1264,7 +1290,10 @@ static void opt_mpd(pid_t process_id)
 {
     ProcList descendants = {0};
     if (collect_descendants(process_id, &descendants) != 0)
-        die_perror("collect_descendants");
+    {
+        fprintf(stderr, "Cannot collect descendants of process %d\n", (int)process_id);
+        return;
+    }
 
     if (descendants.count == 0)
     {
@@ -1272,17 +1301,25 @@ static void opt_mpd(pid_t process_id)
         return;
     }
 
-    long max_cpu_ticks = -1;
+    unsigned long long max_cpu_ticks = 0;
+    int found = 0;
     for (size_t i = 0; i < descendants.count; i++)
     {
-        long cpu_ticks = descendants.proc_items[i].utime_ticks + descendants.proc_items[i].stime_ticks;
-        if (cpu_ticks > max_cpu_ticks)
+        unsigned long long cpu_ticks =
+            (unsigned long long)descendants.proc_items[i].utime_ticks +
+            (unsigned long long)descendants.proc_items[i].stime_ticks;
+        if (!found || cpu_ticks > max_cpu_ticks)
+        {
             max_cpu_ticks = cpu_ticks;
+            found = 1;
+        }
     }
 
     for (size_t i = 0; i < descendants.count; i++)
     {
-        long cpu_ticks = descendants.proc_items[i].utime_ticks + descendants.proc_items[i].stime_ticks;
+        unsigned long long cpu_ticks =
+            (unsigned long long)descendants.proc_items[i].utime_ticks +
+            (unsigned long long)descendants.proc_items[i].stime_ticks;
         if (cpu_ticks == max_cpu_ticks)
         {
             printf("%d is the descendant of %d that has used the most CPU time.\n",
@@ -1290,7 +1327,7 @@ static void opt_mpd(pid_t process_id)
                    (int)process_id);
         }
     }
-    printf("Total CPU time: %ld clock ticks\n", max_cpu_ticks);
+    printf("Total CPU time: %llu clock ticks\n", max_cpu_ticks);
 
     free_proc_list(&descendants);
 }
@@ -1324,7 +1361,7 @@ int main(int argc, char **argv)
         usage(argv[0]);
         return EXIT_FAILURE;
     }
-    if (argv1 < 0 || argv1 > INT_MAX)
+    if (argv1 <= 0 || argv1 > INT_MAX)
     {
         fprintf(stderr, "root_process value is out of range: %s\n", argv[1]);
         usage(argv[0]);
@@ -1339,7 +1376,7 @@ int main(int argc, char **argv)
         usage(argv[0]);
         return EXIT_FAILURE;
     }
-    if (argv2 < 0 || argv2 > INT_MAX)
+    if (argv2 <= 0 || argv2 > INT_MAX)
     {
         fprintf(stderr, "process_id value is out of range: %s\n", argv[2]);
         usage(argv[0]);
@@ -1404,6 +1441,7 @@ int main(int argc, char **argv)
     {
         printf("Unknown option: %s\n", opt);
         usage(argv[0]);
+        return EXIT_FAILURE;
     }
 
     return 0;
