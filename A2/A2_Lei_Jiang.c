@@ -929,6 +929,50 @@ static void opt_kgp(pid_t process_id)
     printf("SIGKILL was sent to process %d\n", (int)grandparent_pid);
 }
 
+/**
+ * -kgp：向 process_id 的父进程发送 SIGKILL 信号，要求它终止。要求不杀死 bash 进程（即使 bash 进程是 process_id 的父进程），以免影响用户的正常操作。
+ * 实现思路：
+ * 1. 先读取 process_id 的父进程 PPID，记为 parent_pid
+ * 2. 如果 parent_pid 不存在或者不大于 1，就说明 process_id 没有父进程或者父进程是 init 进程了，这时不杀死 parent_pid
+ * 3. 如果 parent_pid 是 bash 进程，就不杀死 parent_pid
+ * 4. 否则，向 parent_pid 发送 SIGKILL 信号
+ */
+static void opt_kpp(pid_t process_id)
+{
+    pid_t parent_pid = -1;
+    if (read_ppid_from_proc(process_id, &parent_pid) != 0 || parent_pid <= 0)
+    {
+        fprintf(stderr, "Cannot determine parent process of %d\n", (int)process_id);
+        return;
+    }
+
+    if (parent_pid <= 1)
+    {
+        fprintf(stderr, "Parent is not a user process and will not be terminated\n");
+        return;
+    }
+
+    if (is_bash_process(parent_pid))
+    {
+        fprintf(stderr, "Parent is BASH and will not be terminated\n");
+        return;
+    }
+
+    if (kill(parent_pid, SIGKILL) != 0)
+    {
+        if (errno == ESRCH)
+        {
+            fprintf(stderr, "Parent process %d no longer exists\n", (int)parent_pid);
+            return;
+        }
+
+        fprintf(stderr, "Failed to kill parent %d: %s\n", (int)parent_pid, strerror(errno));
+        return;
+    }
+
+    printf("SIGKILL was sent to process %d\n", (int)parent_pid);
+}
+
 int main(int argc, char **argv)
 {
 
@@ -1018,8 +1062,8 @@ int main(int argc, char **argv)
         opt_sco(process_id);
     else if (strcmp(opt, "-kgp") == 0)
         opt_kgp(process_id);
-    // else if (strcmp(opt, "-kpp") == 0)
-    //     opt_kpp(process_id, &pv);
+    else if (strcmp(opt, "-kpp") == 0)
+        opt_kpp(process_id);
     // else if (strcmp(opt, "-ksp") == 0)
     //     opt_ksp(process_id, &pv, &cm);
     // else if (strcmp(opt, "-kps") == 0)
