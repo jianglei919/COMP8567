@@ -1156,6 +1156,42 @@ static void opt_kcp(pid_t process_id)
     free_proc_list(&descendants);
 }
 
+/**
+ * -krp：向 root_process 发送 SIGKILL 信号，要求它终止。要求不杀死 bash 进程（即使 bash 进程是 root_process），以免影响用户的正常操作。
+ * 实现思路：
+ * 1. 如果 root_process 不存在或者不大于 1，就说明 root_process 没有父进程或者父进程是 init 进程了，这时不杀死 root_process
+ * 2. 如果 root_process 是 bash 进程，就不杀死 root_process
+ * 3. 否则，向 root_process 发送 SIGKILL 信号
+ */
+static void opt_krp(pid_t root_process)
+{
+    if (root_process <= 1)
+    {
+        fprintf(stderr, "Root process is not a user process and will not be terminated\n");
+        return;
+    }
+
+    if (is_bash_process(root_process))
+    {
+        fprintf(stderr, "Root process is BASH and will not be terminated\n");
+        return;
+    }
+
+    if (kill(root_process, SIGKILL) != 0)
+    {
+        if (errno == ESRCH)
+        {
+            fprintf(stderr, "Root process %d no longer exists\n", (int)root_process);
+            return;
+        }
+
+        fprintf(stderr, "Failed to kill root process %d: %s\n", (int)root_process, strerror(errno));
+        return;
+    }
+
+    printf("SIGKILL was sent to process %d\n", (int)root_process);
+}
+
 int main(int argc, char **argv)
 {
 
@@ -1255,8 +1291,8 @@ int main(int argc, char **argv)
         opt_kgc(process_id);
     else if (strcmp(opt, "-kcp") == 0)
         opt_kcp(process_id);
-    // else if (strcmp(opt, "-krp") == 0)
-    //     opt_krp(root_process, &pv);
+    else if (strcmp(opt, "-krp") == 0)
+        opt_krp(root_process);
     // else if (strcmp(opt, "-mmd") == 0)
     //     opt_mmd(process_id, &pv, &cm);
     // else if (strcmp(opt, "-mpd") == 0)
