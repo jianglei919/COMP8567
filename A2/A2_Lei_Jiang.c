@@ -1192,6 +1192,97 @@ static void opt_krp(pid_t root_process)
     printf("SIGKILL was sent to process %d\n", (int)root_process);
 }
 
+/**
+ * -mmd：列出 process_id 的后代中占用内存最多的进程（VmRSS 最大）以及该 VmRSS 值。
+ * 实现思路：
+ * 1. 先用 collect_descendants(process_id, &descendants) 收集后代
+ * 2. 遍历 descendants，找出最大 vmrss_bytes
+ * 3. 再遍历一次，输出所有 vmrss_bytes 等于最大值的后代（处理并列）
+ * 4. 输出最大 VmRSS（bytes）
+ */
+static void opt_mmd(pid_t process_id)
+{
+    ProcList descendants = {0};
+    if (collect_descendants(process_id, &descendants) != 0)
+        die_perror("collect_descendants");
+
+    if (descendants.count == 0)
+    {
+        free_proc_list(&descendants);
+        return;
+    }
+
+    long long max_vmrss = -1;
+    for (size_t i = 0; i < descendants.count; i++)
+    {
+        if (descendants.proc_items[i].vmrss_bytes > max_vmrss)
+            max_vmrss = descendants.proc_items[i].vmrss_bytes;
+    }
+
+    if (max_vmrss < 0)
+    {
+        fprintf(stderr, "No VmRSS information available for descendants of %d\n", (int)process_id);
+        free_proc_list(&descendants);
+        return;
+    }
+
+    for (size_t i = 0; i < descendants.count; i++)
+    {
+        if (descendants.proc_items[i].vmrss_bytes == max_vmrss)
+        {
+            printf("%d is the descendant of %d consuming the most memory.\n",
+                   (int)descendants.proc_items[i].pid,
+                   (int)process_id);
+        }
+    }
+    printf("VmRSS: %lld bytes\n", max_vmrss);
+
+    free_proc_list(&descendants);
+}
+
+/**
+ * -mpd：列出 process_id 的后代中累计 CPU 时间最多的进程（utime+stime 最大），并输出该累计时钟 tick 值。
+ * 实现思路：
+ * 1. 先用 collect_descendants(process_id, &descendants) 收集后代
+ * 2. 对每个后代计算 cpu_ticks = utime_ticks + stime_ticks，找出最大值
+ * 3. 再遍历一次，输出所有 cpu_ticks 等于最大值的后代（处理并列）
+ * 4. 输出最大累计 CPU 时间（clock ticks）
+ */
+static void opt_mpd(pid_t process_id)
+{
+    ProcList descendants = {0};
+    if (collect_descendants(process_id, &descendants) != 0)
+        die_perror("collect_descendants");
+
+    if (descendants.count == 0)
+    {
+        free_proc_list(&descendants);
+        return;
+    }
+
+    long max_cpu_ticks = -1;
+    for (size_t i = 0; i < descendants.count; i++)
+    {
+        long cpu_ticks = descendants.proc_items[i].utime_ticks + descendants.proc_items[i].stime_ticks;
+        if (cpu_ticks > max_cpu_ticks)
+            max_cpu_ticks = cpu_ticks;
+    }
+
+    for (size_t i = 0; i < descendants.count; i++)
+    {
+        long cpu_ticks = descendants.proc_items[i].utime_ticks + descendants.proc_items[i].stime_ticks;
+        if (cpu_ticks == max_cpu_ticks)
+        {
+            printf("%d is the descendant of %d that has used the most CPU time.\n",
+                   (int)descendants.proc_items[i].pid,
+                   (int)process_id);
+        }
+    }
+    printf("Total CPU time: %ld clock ticks\n", max_cpu_ticks);
+
+    free_proc_list(&descendants);
+}
+
 int main(int argc, char **argv)
 {
 
@@ -1293,10 +1384,10 @@ int main(int argc, char **argv)
         opt_kcp(process_id);
     else if (strcmp(opt, "-krp") == 0)
         opt_krp(root_process);
-    // else if (strcmp(opt, "-mmd") == 0)
-    //     opt_mmd(process_id, &pv, &cm);
-    // else if (strcmp(opt, "-mpd") == 0)
-    //     opt_mpd(process_id, &pv, &cm);
+    else if (strcmp(opt, "-mmd") == 0)
+        opt_mmd(process_id);
+    else if (strcmp(opt, "-mpd") == 0)
+        opt_mpd(process_id);
     else
     {
         printf("Unknown option: %s\n", opt);
