@@ -9,11 +9,11 @@ jiang6m@delta:~/workspace/MyProject/COMP8567/A2$ ./a2sampletree
 Main Process: PID=1686582, Parent PID=1682584
     Child 1: PID=1686583, Parent PID=1686582
         Grandchild 1 (GC1): PID=1686585, Parent PID=1686583
-            Great-Grandchild (GGC): PID=1686589, Parent PID=1686585
-        Grandchild 3 (GC3): PID=1686587, Parent PID=1686583
+            Great-Grandchild (GGC): PID=1686589, Parent PID=1686585 <defunct>
+        Grandchild 3 (GC3): PID=1686587, Parent PID=1686583 <defunct>
     Child 2: PID=1686584, Parent PID=1686582
-        Grandchild 2 (GC2): PID=1686588, Parent PID=1686584
-Child 3: PID=1686586, Parent PID=1686582
+        Grandchild 2 (GC2): PID=1686588, Parent PID=1686584 <defunct>
+    Child 3: PID=1686586, Parent PID=1686582 <defunct>
 ```
 
 ### 1.2 进程查询输出
