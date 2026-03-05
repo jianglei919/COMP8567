@@ -4,7 +4,8 @@
 #include <sys/stat.h>
 #include <string.h>
 
-int main() {
+int main()
+{
     int fd;
     char buff1[64];
     char ch;
@@ -15,8 +16,9 @@ int main() {
     umask(0022);
 
     /* Create and open lab3.txt with read/write access */
-    fd = open("lab3.txt", O_RDWR | O_CREAT, 0755);
-    if (fd < 0) {
+    fd = open("lab3.txt", O_RDWR | O_CREAT | O_TRUNC, 0755);
+    if (fd < 0)
+    {
         perror("open fail");
         return 1;
     }
@@ -26,7 +28,8 @@ int main() {
     /* Write initial message to file */
     char msg1[] = "Welcome to COMP 8567, University of Windsor";
     n = write(fd, msg1, strlen(msg1));
-    if (n < 0) {
+    if (n < 0)
+    {
         perror("write fail");
         close(fd);
         return 1;
@@ -42,13 +45,14 @@ int main() {
     buff1[len] = '\0'; // Null-terminate the string
 
     /* Move back to the same position */
-    len = strlen("Welcome to COMP 8567, "); 
+    len = strlen("Welcome to COMP 8567, ");
     lseek(fd, len, SEEK_SET);
 
     /* Write "School of Computer Science," */
     char msg2[] = "School of Computer Science, ";
     n = write(fd, msg2, strlen(msg2));
-    if (n < 0) {
+    if (n < 0)
+    {
         perror("write fail");
         close(fd);
         return 1;
@@ -56,17 +60,19 @@ int main() {
 
     /* Write content of buff1 after it */
     n = write(fd, buff1, strlen(buff1));
-    if (n < 0) {
+    if (n < 0)
+    {
         perror("write fail");
         close(fd);
         return 1;
     }
 
     /* Insert '-' between COMP and 8567 */
-    len  = strlen("Welcome to COMP");
+    len = strlen("Welcome to COMP");
     lseek(fd, len, SEEK_SET);
     n = write(fd, "-", 1);
-    if (n < 0) {
+    if (n < 0)
+    {
         perror("write fail");
         close(fd);
         return 1;
@@ -78,7 +84,8 @@ int main() {
     /* Write "Winter 2026" */
     char msg3[] = "Winter 2026";
     n = write(fd, msg3, strlen(msg3));
-    if (n < 0) {
+    if (n < 0)
+    {
         perror("write fail");
         close(fd);
         return 1;
@@ -88,13 +95,16 @@ int main() {
     filesize = lseek(fd, 0, SEEK_END);
     lseek(fd, 0, SEEK_SET);
 
-    for (i = 0; i < filesize; i++) {
+    for (i = 0; i < filesize; i++)
+    {
         read(fd, &ch, 1);
-        if (ch == '\0') { // If NULL character found
+        if (ch == '\0')
+        {                            // If NULL character found
             lseek(fd, -1, SEEK_CUR); // Move back one byte
-            ch = ' ';   // Replace with space
+            ch = ' ';                // Replace with space
             n = write(fd, &ch, 1);
-            if (n < 0) {
+            if (n < 0)
+            {
                 perror("write fail");
                 close(fd);
                 return 1;
