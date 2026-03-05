@@ -1,0 +1,17 @@
+# C compilation outputs
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+*.dll
+*.out
+
+# Common default executable
+a.out
+
+# Assignment-local compiled executables (no extension)
+A1/A1
+A2/A2
+A2/ptree26w
+A2/a2sampletree
