@@ -1,0 +1,8 @@
+Plan:
+	•	第 1 版：普通命令 + killmb
+	•	第 2 版：;、重定向、&
+	•	第 3 版：pstop、cont、numbg
+	•	第 4 版：|
+	•	第 5 版：~、&&、||
+	•	第 6 版：#、+、++
+	•	第 7 版：|||、killallmb、killbp

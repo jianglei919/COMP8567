@@ -1,0 +1,89 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug A1 on delta",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/A1/A1",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}/A1",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "miDebuggerPath": "/usr/bin/gdb",
+            "preLaunchTask": "build A1",
+            "setupCommands": [
+                {
+                    "description": "Enable pretty-printing",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                }
+            ]
+        },
+        {
+            "name": "Debug A2 on delta",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/A2/A2",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}/A2",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "miDebuggerPath": "/usr/bin/gdb",
+            "preLaunchTask": "build A2",
+            "setupCommands": [
+                {
+                    "description": "Enable pretty-printing",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                }
+            ]
+        },
+        {
+            "name": "Debug A3 on delta",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/A3/A3",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}/A3",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "miDebuggerPath": "/usr/bin/gdb",
+            "preLaunchTask": "build A3",
+            "setupCommands": [
+                {
+                    "description": "Enable pretty-printing",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                }
+            ]
+        },
+        {
+            "name": "Debug A4 on delta",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/A4/A4",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}/A4",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "miDebuggerPath": "/usr/bin/gdb",
+            "preLaunchTask": "build A4",
+            "setupCommands": [
+                {
+                    "description": "Enable pretty-printing",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                }
+            ]
+        }
+    ]
+}
