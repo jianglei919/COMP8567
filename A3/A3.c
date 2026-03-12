@@ -500,11 +500,47 @@ static int handle_builtin(CommandInfo *cmd_info)
     return -1; /* not a builtin */
 }
 
-// 顺序执行
-static int execute_sequential(CommandInfo *cmd_info)
+// 顺序执行：按 ';' 拆分原始行，依次执行每个子命令（最多 4 个）
+static int execute_sequential(char *line)
 {
-    fprintf(stderr, "TODO execute_sequential: %s\n", cmd_info->argv[0]);
-    return 0;
+    char buf[MAX_LINE];
+    char *saveptr = NULL;
+    char *segment;
+    int seg_count = 0;
+    int ret = 0;
+
+    strncpy(buf, line, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+
+    segment = strtok_r(buf, ";", &saveptr);
+    while (segment != NULL)
+    {
+        trim_inplace(segment);
+
+        if (segment[0] == '\0')
+        {
+            segment = strtok_r(NULL, ";", &saveptr);
+            continue;
+        }
+
+        seg_count++;
+        if (seg_count > 4)
+        {
+            fprintf(stderr, "minibash: ';' supports at most 4 commands\n");
+            return -1;
+        }
+
+        CommandInfo seg_cmd;
+        if (resolve_command(segment, &seg_cmd))
+        {
+            ret = run_cmd(&seg_cmd, true, -1, -1);
+            free_cmdinfo(&seg_cmd);
+        }
+
+        segment = strtok_r(NULL, ";", &saveptr);
+    }
+
+    return ret;
 }
 
 // 条件执行
@@ -618,7 +654,7 @@ int main(void)
             handle_builtin(&cmd_out);
             break;
         case SEQUENTIAL:
-            execute_sequential(&cmd_out);
+            execute_sequential(line);
             break;
         case CONDITIONAL:
             execute_conditional(&cmd_out);
