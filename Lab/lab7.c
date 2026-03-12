@@ -91,8 +91,8 @@ int main()
                 // Resume C1
                 kill(getppid(), SIGCONT);
 
-                // GC1 sleeps 10 seconds at the end of each round (per assignment note)
-                sleep(10);
+                // Stop again
+                kill(getpid(), SIGSTOP);
             }
         }
         else
