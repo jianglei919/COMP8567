@@ -37,6 +37,7 @@ typedef enum
     TXT_APPEND_BOTH,
     WORD_COUNT,
     TXT_CONCAT,
+    SIMPLE_BACKGROUND,
     SIMPLE
 } CommandType;
 
@@ -95,71 +96,17 @@ static void bg_add(pid_t pid)
     }
 }
 
-static int handle_builtin2(char *line)
+/* List of builtin command names, used only for type detection. */
+static const char *BUILTIN_NAMES[] = {
+    "killmb", "killallmb", "pstop", "cont", "numbg", "killbp", NULL};
+
+static bool is_builtin(const char *name)
 {
-    /* killmb – exit this minibash instance */
-    if (strcmp(line, "killmb") == 0)
-    {
-        printf("minibash: exiting.\n");
-        exit(0);
-    }
-
-    /* killallmb – kill every minibash process visible in the system */
-    if (strcmp(line, "killallmb") == 0)
-    {
-        /* TODO: scan /proc or use kill(-1, SIGTERM) with name filter.
-         *       Use getpid() to exclude self.                          */
-        fprintf(stderr, "TODO: killallmb\n");
-        return 0;
-    }
-
-    /* pstop – SIGSTOP the most recently started background process */
-    if (strcmp(line, "pstop") == 0)
-    {
-        if (last_bg_pid == -1)
-        {
-            fprintf(stderr, "minibash: no background process to stop.\n");
-        }
-        else
-        {
-            /* TODO: send SIGSTOP, update last_stopped_pid */
-            fprintf(stderr, "TODO: pstop pid=%d\n", (int)last_bg_pid);
-            last_stopped_pid = last_bg_pid;
-        }
-        return 0;
-    }
-
-    /* cont – SIGCONT the most recently stopped process; wait for it */
-    if (strcmp(line, "cont") == 0)
-    {
-        if (last_stopped_pid == -1)
-        {
-            fprintf(stderr, "minibash: no stopped process to continue.\n");
-        }
-        else
-        {
-            /* TODO: send SIGCONT, waitpid in foreground */
-            fprintf(stderr, "TODO: cont pid=%d\n", (int)last_stopped_pid);
-        }
-        return 0;
-    }
-
-    /* numbg – print current background process count */
-    if (strcmp(line, "numbg") == 0)
-    {
-        printf("Background processes: %d\n", bg_count);
-        return 0;
-    }
-
-    /* killbp – kill all processes in current bash except bash & minibash */
-    if (strcmp(line, "killbp") == 0)
-    {
-        /* TODO: iterate bg_pids[], send SIGKILL to each. */
-        fprintf(stderr, "TODO: killbp\n");
-        return 0;
-    }
-
-    return -1; /* not a builtin */
+    int i;
+    for (i = 0; BUILTIN_NAMES[i] != NULL; i++)
+        if (strcmp(name, BUILTIN_NAMES[i]) == 0)
+            return true;
+    return false;
 }
 
 // 解析命令，识别命令类型并调用对应的执行函数
@@ -169,9 +116,17 @@ static CommandType resolve_command_type(char *line)
     if (line[0] == '\0')
         return NONE;
 
-    /* Builtin commands are handled first (no fork needed). */
-    if (handle_builtin2(line) != -1)
-        return BUILTIN;
+    /* Builtin commands are handled first (no fork needed).
+     * Only check the first token (command name) against known builtins. */
+    {
+        char tmp[MAX_LINE];
+        char *sp = NULL;
+        strncpy(tmp, line, sizeof(tmp) - 1);
+        tmp[sizeof(tmp) - 1] = '\0';
+        char *first = strtok_r(tmp, " \t", &sp);
+        if (first != NULL && is_builtin(first))
+            return BUILTIN;
+    }
 
     /* ';' sequential */
     if (strchr(line, ';') != NULL)
@@ -204,7 +159,7 @@ static CommandType resolve_command_type(char *line)
 
     /* '&' background (trailing) */
     if (strchr(line, '&') != NULL)
-        return BUILTIN; // or some other appropriate command type
+        return SIMPLE_BACKGROUND;
 
     /* '++' bidirectional txt append – before single '+' */
     if (strstr(line, "++") != NULL)
@@ -272,7 +227,18 @@ static bool resolve_command(char *line, CommandInfo *cmd_out)
             }
             else
             {
-                if (cmd_out->argc < MAX_ARGC)
+                /* Skip the '&' background marker – it is a shell operator,
+                 * not an argument to the command. Also handle the case where
+                 * '&' is glued to the last token (e.g. "sleep 5&"). */
+                size_t tlen = strlen(token);
+                if (tlen > 0 && token[tlen - 1] == '&')
+                    token[tlen - 1] = '\0'; /* strip trailing & in-place */
+
+                if (strcmp(token, "&") == 0 || token[0] == '\0')
+                {
+                    /* standalone '&' or now-empty token → skip */
+                }
+                else if (cmd_out->argc < MAX_ARGC)
                 {
                     /* strdup: token points into local buf which is freed on
                      * return; we need heap-allocated copies that outlive this
@@ -446,11 +412,92 @@ static int execute_background_command(CommandInfo *cmd_info)
     return 0;
 }
 
-// 内置命令
+// 内置命令：执行所有内建命令逻辑
 static int handle_builtin(CommandInfo *cmd_info)
 {
-    fprintf(stderr, "TODO handle_builtin: %s\n", cmd_info->argv[0]);
-    return 0;
+    const char *name = cmd_info->argv[0];
+
+    /* killmb – exit this minibash instance */
+    if (strcmp(name, "killmb") == 0)
+    {
+        printf("minibash: exiting.\n");
+        exit(0);
+    }
+
+    /* killallmb – kill every minibash process on the system */
+    if (strcmp(name, "killallmb") == 0)
+    {
+        /* TODO: scan process list and kill all other minibash instances.
+         *       Use getpid() to exclude self. */
+        fprintf(stderr, "TODO: killallmb\n");
+        return 0;
+    }
+
+    /* pstop – SIGSTOP the most recently started background process */
+    if (strcmp(name, "pstop") == 0)
+    {
+        if (last_bg_pid == -1)
+        {
+            fprintf(stderr, "minibash: no background process to stop.\n");
+        }
+        else
+        {
+            if (kill(last_bg_pid, SIGSTOP) < 0)
+                perror("pstop");
+            else
+            {
+                last_stopped_pid = last_bg_pid;
+                printf("[pstop] stopped pid %d\n", (int)last_bg_pid);
+            }
+        }
+        return 0;
+    }
+
+    /* cont – SIGCONT the most recently stopped process and wait for it */
+    if (strcmp(name, "cont") == 0)
+    {
+        if (last_stopped_pid == -1)
+        {
+            fprintf(stderr, "minibash: no stopped process to continue.\n");
+        }
+        else
+        {
+            if (kill(last_stopped_pid, SIGCONT) < 0)
+                perror("cont");
+            else
+            {
+                printf("[cont] continuing pid %d in foreground\n", (int)last_stopped_pid);
+                int status;
+                waitpid(last_stopped_pid, &status, 0);
+                last_stopped_pid = -1;
+            }
+        }
+        return 0;
+    }
+
+    /* numbg – print current live background process count */
+    if (strcmp(name, "numbg") == 0)
+    {
+        printf("Background processes: %d\n", bg_count);
+        return 0;
+    }
+
+    /* killbp – kill all background processes in current minibash */
+    if (strcmp(name, "killbp") == 0)
+    {
+        int i;
+        for (i = 0; i < bg_count; i++)
+        {
+            if (kill(bg_pids[i], SIGKILL) < 0)
+                perror("killbp");
+            else
+                printf("[killbp] killed pid %d\n", (int)bg_pids[i]);
+        }
+        bg_count = 0;
+        return 0;
+    }
+
+    return -1; /* not a builtin */
 }
 
 // 顺序执行
@@ -594,6 +641,9 @@ int main(void)
             break;
         case TXT_CONCAT:
             execute_txt_concat(&cmd_out);
+            break;
+        case SIMPLE_BACKGROUND:
+            execute_background_command(&cmd_out);
             break;
         case SIMPLE:
             execute_simple_command(&cmd_out);
