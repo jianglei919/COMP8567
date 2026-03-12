@@ -544,10 +544,85 @@ static int execute_sequential(char *line)
 }
 
 // 条件执行
-static int execute_conditional(CommandInfo *cmd_info)
+// 条件执行：按 '&&' / '||' 拆分原始行，左到右执行（最多 4 个运算符）
+// &&：前一条成功(ret==0)才执行下一条
+// ||：前一条失败(ret!=0)才执行下一条
+static int execute_conditional(char *line)
 {
-    fprintf(stderr, "TODO execute_conditional: %s\n", cmd_info->argv[0]);
-    return 0;
+    char buf[MAX_LINE];
+    char *segments[5]; /* 最多 4 个运算符 → 5 个段 */
+    int ops[4];        /* 1 = &&, 0 = || */
+    int nseg = 0;
+    char *p, *seg_start;
+
+    strncpy(buf, line, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+
+    p = buf;
+    seg_start = p;
+
+    while (*p != '\0')
+    {
+        bool is_and = (p[0] == '&' && p[1] == '&');
+        /* 只匹配 ||, 排除 ||| (FIFO 操作符) */
+        bool is_or = (p[0] == '|' && p[1] == '|' && p[2] != '|');
+
+        if (is_and || is_or)
+        {
+            if (nseg >= 4)
+            {
+                fprintf(stderr, "minibash: '&&'/'||' supports at most 4 operators\n");
+                return -1;
+            }
+            /* NUL-terminate 当前段并记录 */
+            *p = '\0';
+            trim_inplace(seg_start);
+            segments[nseg] = seg_start;
+            ops[nseg] = is_and ? 1 : 0;
+            nseg++;
+
+            p += 2;
+            seg_start = p;
+        }
+        else
+        {
+            p++;
+        }
+    }
+
+    /* 收尾最后一段 */
+    trim_inplace(seg_start);
+    segments[nseg++] = seg_start;
+
+    /* 按运算符规则逐段执行 */
+    int prev_ret = 0;
+    int i;
+    for (i = 0; i < nseg; i++)
+    {
+        bool should_run;
+        if (i == 0)
+            should_run = true;
+        else if (ops[i - 1] == 1) /* && */
+            should_run = (prev_ret == 0);
+        else /* || */
+            should_run = (prev_ret != 0);
+
+        if (should_run && segments[i][0] != '\0')
+        {
+            CommandInfo seg_cmd;
+            if (resolve_command(segments[i], &seg_cmd))
+            {
+                prev_ret = run_cmd(&seg_cmd, true, -1, -1);
+                free_cmdinfo(&seg_cmd);
+            }
+            else
+            {
+                prev_ret = -1;
+            }
+        }
+    }
+
+    return prev_ret;
 }
 
 // 普通管道
@@ -657,7 +732,7 @@ int main(void)
             execute_sequential(line);
             break;
         case CONDITIONAL:
-            execute_conditional(&cmd_out);
+            execute_conditional(line);
             break;
         case PIPE_CHAIN:
             execute_pipe_chain(&cmd_out);
