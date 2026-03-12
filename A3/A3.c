@@ -544,8 +544,13 @@ static int execute_fifo_read(CommandInfo *cmd_info)
 // 重定向
 static int execute_redirection(CommandInfo *cmd_info)
 {
-    fprintf(stderr, "TODO execute_redirection: %s\n", cmd_info->argv[0]);
-    return 0;
+    // 至少需要有目标文件
+    if (cmd_info->infile == NULL && cmd_info->outfile == NULL)
+    {
+        fprintf(stderr, "minibash: redirection: no file specified\n");
+        return -1;
+    }
+    return run_cmd(cmd_info, true, -1, -1);
 }
 
 // 文本双向追加 ++

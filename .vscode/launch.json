@@ -44,7 +44,38 @@
             ]
         },
         {
-            "name": "Debug A3 on delta",
+            "name": "Debug A3 parent on delta",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/A3/A3",
+            "args": [],
+            "stopAtEntry": true,
+            "cwd": "${workspaceFolder}/A3",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "miDebuggerPath": "/usr/bin/gdb",
+            "preLaunchTask": "build A3",
+            "setupCommands": [
+                {
+                    "description": "Enable pretty-printing",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                },
+                {
+                    "description": "Follow parent after fork",
+                    "text": "set follow-fork-mode parent",
+                    "ignoreFailures": true
+                },
+                {
+                    "description": "Detach child after fork",
+                    "text": "set detach-on-fork on",
+                    "ignoreFailures": true
+                }
+            ]
+        },
+        {
+            "name": "Debug A3 child on delta",
             "type": "cppdbg",
             "request": "launch",
             "program": "${workspaceFolder}/A3/A3",
@@ -60,6 +91,15 @@
                 {
                     "description": "Enable pretty-printing",
                     "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                },
+                {
+                    "description": "Follow child after fork",
+                    "text": "set follow-fork-mode child",
+                    "ignoreFailures": true
+                },
+                {
+                    "text": "set detach-on-fork on",
                     "ignoreFailures": true
                 }
             ]
