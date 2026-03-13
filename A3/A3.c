@@ -126,6 +126,22 @@ typedef enum
     EXEC_INVALID       // 不支持的混合操作符组合
 } ExecType;
 
+typedef enum
+{
+    PARSE_ERR_INVALID_INPUT = -1,
+    PARSE_ERR_TOO_MANY_TOKENS = -2,
+    PARSE_ERR_TOKEN_TOO_LONG = -3,
+    PARSE_ERR_ARG_TOO_LONG = -4,
+    PARSE_ERR_TOO_MANY_ARGS = -5,
+    PARSE_ERR_INPUT_FILE_TOO_LONG = -6,
+    PARSE_ERR_OUTPUT_FILE_TOO_LONG = -7,
+    PARSE_ERR_TOO_MANY_COMMANDS = -8,
+    PARSE_ERR_TOO_MANY_OPERATORS = -9,
+    PARSE_ERR_EXPECTED_OPERATOR = -10,
+    PARSE_ERR_EXPECTED_COMMAND = -11,
+    PARSE_ERR_INPUT_LINE_TOO_LONG = -12
+} ParseErrorCode;
+
 /* List of builtin command names, used only for type detection. */
 static const char *BUILTIN_NAMES[] = {
     "killmb", "killallmb", "pstop", "cont", "numbg", "killbp", NULL};
@@ -165,6 +181,61 @@ static void trim_inplace(char *s)
     s[j] = '\0';
 }
 
+static void discard_rest_of_line(void)
+{
+    int ch;
+    do
+    {
+        ch = getchar();
+    } while (ch != '\n' && ch != EOF);
+}
+
+static void report_parse_error(int rc)
+{
+    switch (rc)
+    {
+    case PARSE_ERR_INVALID_INPUT:
+        fprintf(stderr, "minibash: invalid parser input\n");
+        break;
+    case PARSE_ERR_TOO_MANY_TOKENS:
+        fprintf(stderr, "minibash: too many tokens (max %d)\n", MAX_TOKENS - 1);
+        break;
+    case PARSE_ERR_TOKEN_TOO_LONG:
+        fprintf(stderr, "minibash: token too long\n");
+        break;
+    case PARSE_ERR_ARG_TOO_LONG:
+        fprintf(stderr, "minibash: argument too long\n");
+        break;
+    case PARSE_ERR_TOO_MANY_ARGS:
+        fprintf(stderr, "minibash: too many arguments (max %d)\n", MAX_ARGC);
+        break;
+    case PARSE_ERR_INPUT_FILE_TOO_LONG:
+        fprintf(stderr, "minibash: input filename too long\n");
+        break;
+    case PARSE_ERR_OUTPUT_FILE_TOO_LONG:
+        fprintf(stderr, "minibash: output filename too long\n");
+        break;
+    case PARSE_ERR_TOO_MANY_COMMANDS:
+        fprintf(stderr, "minibash: too many command segments (max %d)\n", MAX_CMDS);
+        break;
+    case PARSE_ERR_TOO_MANY_OPERATORS:
+        fprintf(stderr, "minibash: too many operators (max %d)\n", MAX_CMDS - 1);
+        break;
+    case PARSE_ERR_EXPECTED_OPERATOR:
+        fprintf(stderr, "minibash: expected command operator\n");
+        break;
+    case PARSE_ERR_EXPECTED_COMMAND:
+        fprintf(stderr, "minibash: expected command content\n");
+        break;
+    case PARSE_ERR_INPUT_LINE_TOO_LONG:
+        fprintf(stderr, "minibash: input line too long (max %d chars)\n", MAX_LINE - 1);
+        break;
+    default:
+        fprintf(stderr, "minibash: parse failed\n");
+        break;
+    }
+}
+
 /* Add a pid to the background list. */
 static void bg_add(pid_t pid)
 {
@@ -184,10 +255,13 @@ static bool is_builtin(const char *name)
     return false;
 }
 
-static bool push_token(Token *tokens, int max_tokens, int *count, TokType type, const char *text)
+static int push_token(Token *tokens, int max_tokens, int *count, TokType type, const char *text)
 {
     if (*count >= max_tokens - 1)
-        return false;
+        return PARSE_ERR_TOO_MANY_TOKENS;
+
+    if (text != NULL && strlen(text) >= sizeof(tokens[*count].text))
+        return PARSE_ERR_TOKEN_TOO_LONG;
 
     tokens[*count].type = type;
     if (text == NULL)
@@ -198,7 +272,7 @@ static bool push_token(Token *tokens, int max_tokens, int *count, TokType type, 
         tokens[*count].text[sizeof(tokens[*count].text) - 1] = '\0';
     }
     (*count)++;
-    return true;
+    return 0;
 }
 
 static bool is_command_connector(TokType type)
@@ -210,16 +284,13 @@ static bool is_command_connector(TokType type)
 static int append_command_arg(Command *cmd, const char *text)
 {
     if (cmd->argc >= MAX_ARGC)
-    {
-        fprintf(stderr, "minibash: parser supports at most %d argv entries per command\n", MAX_ARGC);
-        return -1;
-    }
+        return PARSE_ERR_TOO_MANY_ARGS;
 
     cmd->argv[cmd->argc] = strdup(text);
     if (cmd->argv[cmd->argc] == NULL)
     {
         perror("strdup");
-        return -1;
+        return PARSE_ERR_INVALID_INPUT;
     }
     cmd->argc++;
     cmd->argv[cmd->argc] = NULL;
@@ -231,9 +302,10 @@ int lex(const char *line, Token *tokens, int max_tokens)
 {
     const char *p;
     int count = 0;
+    int rc;
 
     if (line == NULL || tokens == NULL || max_tokens < 2)
-        return -1;
+        return PARSE_ERR_INVALID_INPUT;
 
     p = line;
     while (*p != '\0')
@@ -246,86 +318,100 @@ int lex(const char *line, Token *tokens, int max_tokens)
 
         if (p[0] == '|' && p[1] == '|' && p[2] == '|')
         {
-            if (!push_token(tokens, max_tokens, &count, TOK_TPIPE, "|||"))
-                return -1;
+            rc = push_token(tokens, max_tokens, &count, TOK_TPIPE, "|||");
+            if (rc < 0)
+                return rc;
             p += 3;
         }
         else if (p[0] == '|' && p[1] == '|')
         {
-            if (!push_token(tokens, max_tokens, &count, TOK_DPIPE, "||"))
-                return -1;
+            rc = push_token(tokens, max_tokens, &count, TOK_DPIPE, "||");
+            if (rc < 0)
+                return rc;
             p += 2;
         }
         else if (p[0] == '&' && p[1] == '&')
         {
-            if (!push_token(tokens, max_tokens, &count, TOK_DAMP, "&&"))
-                return -1;
+            rc = push_token(tokens, max_tokens, &count, TOK_DAMP, "&&");
+            if (rc < 0)
+                return rc;
             p += 2;
         }
         else if (p[0] == '>' && p[1] == '>')
         {
-            if (!push_token(tokens, max_tokens, &count, TOK_REDIR_APP, ">>"))
-                return -1;
+            rc = push_token(tokens, max_tokens, &count, TOK_REDIR_APP, ">>");
+            if (rc < 0)
+                return rc;
             p += 2;
         }
         else if (*p == '|')
         {
-            if (!push_token(tokens, max_tokens, &count, TOK_PIPE, "|"))
-                return -1;
+            rc = push_token(tokens, max_tokens, &count, TOK_PIPE, "|");
+            if (rc < 0)
+                return rc;
             p++;
         }
         else if (*p == '&')
         {
-            if (!push_token(tokens, max_tokens, &count, TOK_AMP, "&"))
-                return -1;
+            rc = push_token(tokens, max_tokens, &count, TOK_AMP, "&");
+            if (rc < 0)
+                return rc;
             p++;
         }
         else if (*p == ';')
         {
-            if (!push_token(tokens, max_tokens, &count, TOK_SEMI, ";"))
-                return -1;
+            rc = push_token(tokens, max_tokens, &count, TOK_SEMI, ";");
+            if (rc < 0)
+                return rc;
             p++;
         }
         else if (*p == '~')
         {
-            if (!push_token(tokens, max_tokens, &count, TOK_TILDE, "~"))
-                return -1;
+            rc = push_token(tokens, max_tokens, &count, TOK_TILDE, "~");
+            if (rc < 0)
+                return rc;
             p++;
         }
         else if (p[0] == '+' && p[1] == '+')
         {
-            if (!push_token(tokens, max_tokens, &count, TOK_DPLUS, "++"))
-                return -1;
+            rc = push_token(tokens, max_tokens, &count, TOK_DPLUS, "++");
+            if (rc < 0)
+                return rc;
             p += 2;
         }
         else if (*p == '+')
         {
-            if (!push_token(tokens, max_tokens, &count, TOK_PLUS, "+"))
-                return -1;
+            rc = push_token(tokens, max_tokens, &count, TOK_PLUS, "+");
+            if (rc < 0)
+                return rc;
             p++;
         }
         else if (*p == '#')
         {
-            if (!push_token(tokens, max_tokens, &count, TOK_HASH, "#"))
-                return -1;
+            rc = push_token(tokens, max_tokens, &count, TOK_HASH, "#");
+            if (rc < 0)
+                return rc;
             p++;
         }
         else if (*p == '<')
         {
-            if (!push_token(tokens, max_tokens, &count, TOK_REDIR_IN, "<"))
-                return -1;
+            rc = push_token(tokens, max_tokens, &count, TOK_REDIR_IN, "<");
+            if (rc < 0)
+                return rc;
             p++;
         }
         else if (*p == '>')
         {
-            if (!push_token(tokens, max_tokens, &count, TOK_REDIR_OUT, ">"))
-                return -1;
+            rc = push_token(tokens, max_tokens, &count, TOK_REDIR_OUT, ">");
+            if (rc < 0)
+                return rc;
             p++;
         }
         else
         {
             char word[MAX_LINE];
             int word_len = 0;
+            bool overflow = false;
 
             while (*p != '\0' && !isspace((unsigned char)*p) &&
                    *p != '|' && *p != '&' && *p != ';' && *p != '~' &&
@@ -333,12 +419,18 @@ int lex(const char *line, Token *tokens, int max_tokens)
             {
                 if (word_len < (int)sizeof(word) - 1)
                     word[word_len++] = *p;
+                else
+                    overflow = true;
                 p++;
             }
             word[word_len] = '\0';
 
-            if (!push_token(tokens, max_tokens, &count, TOK_WORD, word))
-                return -1;
+            if (overflow)
+                return PARSE_ERR_ARG_TOO_LONG;
+
+            rc = push_token(tokens, max_tokens, &count, TOK_WORD, word);
+            if (rc < 0)
+                return rc;
         }
     }
 
@@ -384,7 +476,7 @@ int parse_operator(const Token *tokens, int ntok, int *pos, OperatorType *out)
 int parse_command(const Token *tokens, int ntok, int *pos, Command *out)
 {
     if (tokens == NULL || pos == NULL || out == NULL || *pos >= ntok)
-        return 0;
+        return PARSE_ERR_INVALID_INPUT;
 
     memset(out, 0, sizeof(*out));
     out->node_type = NODE_SIMPLE;
@@ -396,10 +488,13 @@ int parse_command(const Token *tokens, int ntok, int *pos, Command *out)
         switch (tok->type)
         {
         case TOK_WORD:
-            if (append_command_arg(out, tok->text) < 0)
-                return -1;
+        {
+            int rc = append_command_arg(out, tok->text);
+            if (rc < 0)
+                return rc;
             (*pos)++;
             break;
+        }
         case TOK_HASH:
             out->node_type = NODE_WORD_COUNT;
             (*pos)++;
@@ -424,7 +519,9 @@ int parse_command(const Token *tokens, int ntok, int *pos, Command *out)
         case TOK_REDIR_IN:
             (*pos)++;
             if (*pos >= ntok || tokens[*pos].type != TOK_WORD)
-                return -1;
+                return PARSE_ERR_EXPECTED_COMMAND;
+            if (strlen(tokens[*pos].text) >= sizeof(out->input_file))
+                return PARSE_ERR_INPUT_FILE_TOO_LONG;
             strncpy(out->input_file, tokens[*pos].text, sizeof(out->input_file) - 1);
             out->input_file[sizeof(out->input_file) - 1] = '\0';
             out->redirect_in = 1;
@@ -434,7 +531,9 @@ int parse_command(const Token *tokens, int ntok, int *pos, Command *out)
         case TOK_REDIR_APP:
             (*pos)++;
             if (*pos >= ntok || tokens[*pos].type != TOK_WORD)
-                return -1;
+                return PARSE_ERR_EXPECTED_COMMAND;
+            if (strlen(tokens[*pos].text) >= sizeof(out->output_file))
+                return PARSE_ERR_OUTPUT_FILE_TOO_LONG;
             strncpy(out->output_file, tokens[*pos].text, sizeof(out->output_file) - 1);
             out->output_file[sizeof(out->output_file) - 1] = '\0';
             out->redirect_out = 1;
@@ -442,44 +541,46 @@ int parse_command(const Token *tokens, int ntok, int *pos, Command *out)
             (*pos)++;
             break;
         default:
-            return -1;
+            return PARSE_ERR_EXPECTED_COMMAND;
         }
     }
 
-    return out->argc > 0 ? 1 : -1;
+    return out->argc > 0 ? 1 : PARSE_ERR_EXPECTED_COMMAND;
 }
 
 // 解析命令行字符串，构建 CommandLine 结构
 int parse_command_line(const Token *tokens, int ntok, CommandLine *out)
 {
     int pos = 0;
+    int rc;
 
     if (tokens == NULL || out == NULL)
-        return -1;
+        return PARSE_ERR_INVALID_INPUT;
 
     memset(out, 0, sizeof(*out));
 
     while (pos < ntok && tokens[pos].type != TOK_EOF)
     {
         if (out->cmd_count >= MAX_CMDS)
-            return -1;
+            return PARSE_ERR_TOO_MANY_COMMANDS;
 
-        if (parse_command(tokens, ntok, &pos, &out->cmds[out->cmd_count]) <= 0)
-            return -1;
+        rc = parse_command(tokens, ntok, &pos, &out->cmds[out->cmd_count]);
+        if (rc <= 0)
+            return (rc < 0) ? rc : PARSE_ERR_EXPECTED_COMMAND;
         out->cmd_count++;
 
         if (pos >= ntok || tokens[pos].type == TOK_EOF)
             break;
 
         if (out->op_count >= MAX_CMDS - 1)
-            return -1;
+            return PARSE_ERR_TOO_MANY_OPERATORS;
 
         if (!parse_operator(tokens, ntok, &pos, &out->ops[out->op_count]))
-            return -1;
+            return PARSE_ERR_EXPECTED_OPERATOR;
         out->op_count++;
     }
 
-    return out->cmd_count > 0 ? 0 : -1;
+    return out->cmd_count > 0 ? 0 : PARSE_ERR_EXPECTED_COMMAND;
 }
 
 // 释放 Command 中分配的 argv 字符串
@@ -668,11 +769,75 @@ static int exc_single_cmd(const Command *cmd)
     return run_cmd(cmd, foreground, -1, -1);
 }
 
+static int exc_fifo_write_cmd(const Command *cmd);
+static int exc_fifo_read_cmd(const Command *cmd);
+static int exc_word_count_cmd(const Command *cmd);
+static int exc_txt_cat_cmd(const Command *cmd);
+static int exc_txt_app_cmd(const Command *cmd);
+
+/**
+ * 执行命令序列，按照顺序依次执行每个命令，不管前一个命令的结果如何。
+ * 例如：`cmd1 ; cmd2 ; cmd3` 会先执行 cmd1 -> cmd2 -> cmd3。
+ * 1. 校验 cmdline 合法性
+ * 2. 校验这条命令链确实是纯 ;（OP_SEQ）序列
+ * 3. 按顺序遍历每个 Command
+ * 4. 用 switch (cmd->node_type) 分发到对应 exc_* 函数
+ * 5. 返回最后一个命令的退出码
+ */
 static int exc_sequence_cmd(CommandLine *cmdline)
 {
-    (void)cmdline;
-    fprintf(stderr, "TODO: exc_sequence_cmd\n");
-    return -1;
+    int i;
+    int last_rc = 0; // 最后一个命令的返回码
+
+    if (cmdline == NULL || cmdline->cmd_count <= 0)
+        return -1;
+
+    if (cmdline->op_count != cmdline->cmd_count - 1)
+        return -1;
+
+    for (i = 0; i < cmdline->op_count; i++)
+    {
+        if (cmdline->ops[i] != OP_SEQ)
+        {
+            fprintf(stderr, "minibash: exc_sequence_cmd only supports ';' operators\n");
+            return -1;
+        }
+    }
+
+    for (i = 0; i < cmdline->cmd_count; i++)
+    {
+        const Command *cmd = &cmdline->cmds[i];
+
+        // 根据 node_type 分发到对应的 exc_* 函数
+        switch (cmd->node_type)
+        {
+        case NODE_SIMPLE:
+        case NODE_BG:
+            last_rc = exc_single_cmd(cmd);
+            break;
+        case NODE_FIFO_W:
+            last_rc = exc_fifo_write_cmd(cmd);
+            break;
+        case NODE_FIFO_R:
+            last_rc = exc_fifo_read_cmd(cmd);
+            break;
+        case NODE_WORD_COUNT:
+            last_rc = exc_word_count_cmd(cmd);
+            break;
+        case NODE_TXT_CAT:
+            last_rc = exc_txt_cat_cmd(cmd);
+            break;
+        case NODE_TXT_APP:
+            last_rc = exc_txt_app_cmd(cmd);
+            break;
+        default:
+            fprintf(stderr, "minibash: unknown command node type in sequence\n");
+            last_rc = -1;
+            break;
+        }
+    }
+
+    return last_rc;
 }
 
 static int exc_conditional_cmd(CommandLine *cmdline)
@@ -731,6 +896,7 @@ static int exc_txt_app_cmd(const Command *cmd)
     return -1;
 }
 
+// 根据解析结果中的命令类型调用不同的执行函数
 static int exc_parsed(CommandLine *cmdline)
 {
     int i;
@@ -837,6 +1003,14 @@ int main(void)
             perror("fgets");
             continue;
         }
+
+        if (strchr(line, '\n') == NULL)
+        {
+            report_parse_error(PARSE_ERR_INPUT_LINE_TOO_LONG);
+            discard_rest_of_line();
+            continue;
+        }
+
         line[strcspn(line, "\n")] = '\0'; // 去掉末尾的换行符
 
         trim_inplace(line);
@@ -854,13 +1028,14 @@ int main(void)
 
         if (ntok < 0)
         {
-            fprintf(stderr, "minibash: lex failed\n");
+            report_parse_error(ntok);
             continue;
         }
 
-        if (parse_command_line(tokens, ntok, &parsed) < 0)
+        int prc = parse_command_line(tokens, ntok, &parsed);
+        if (prc < 0)
         {
-            fprintf(stderr, "minibash: parse failed\n");
+            report_parse_error(prc);
             continue;
         }
 
