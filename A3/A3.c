@@ -26,7 +26,7 @@ pid_t last_bg_pid;
 pid_t last_stopped_pid;
 
 // 命令之间的连接类型
-typedef enum
+typedef enum OperatorType
 {
     OP_PIPE,
     OP_AND,
@@ -36,7 +36,7 @@ typedef enum
 } OperatorType;
 
 // 命令节点的类型
-typedef enum
+typedef enum NodeType
 {
     NODE_SIMPLE,     // 普通命令
     NODE_BG,         // 后台命令
@@ -48,7 +48,7 @@ typedef enum
 } NodeType;
 
 // 词法分析得到的 token 类型
-typedef enum
+typedef enum TokType
 {
     TOK_WORD,
     TOK_PIPE,
@@ -74,7 +74,7 @@ typedef enum
 } TokType;
 
 // 词法分析得到的 token 结构
-typedef struct
+typedef struct Token
 {
     TokType type;        // token 类型
     char text[MAX_LINE]; // token 文本内容，最长 MAX_LINE-1 字符 + 结尾 '\0'
@@ -106,7 +106,7 @@ typedef struct Command
 } Command;
 
 // 整条命令行的结构，包含多段命令和连接它们的操作符
-typedef struct
+typedef struct CommandLine
 {
     Command cmds[MAX_CMDS]; // 最多支持 MAX_CMDS 段命令
     int cmd_count;          // 实际的命令段数，范围 1~MAX_CMDS
@@ -116,7 +116,7 @@ typedef struct
 } CommandLine;
 
 // 命令执行类型
-typedef enum
+typedef enum ExecType
 {
     EXEC_SINGLE,       // 单命令，根据 node_type 分发
     EXEC_SEQUENCE,     // ; 顺序执行命令
@@ -126,7 +126,7 @@ typedef enum
     EXEC_INVALID       // 不支持的混合操作符组合
 } ExecType;
 
-typedef enum
+typedef enum ParseErrorCode
 {
     PARSE_ERR_INVALID_INPUT = -1,
     PARSE_ERR_TOO_MANY_TOKENS = -2,
@@ -775,6 +775,30 @@ static int exc_word_count_cmd(const Command *cmd);
 static int exc_txt_cat_cmd(const Command *cmd);
 static int exc_txt_app_cmd(const Command *cmd);
 
+// 根据命令节点类型(NodeType)分发到对应的执行函数
+static int exc_dispatch_cmd(const Command *cmd, const char *where)
+{
+    switch (cmd->node_type)
+    {
+    case NODE_SIMPLE:
+    case NODE_BG:
+        return exc_single_cmd(cmd);
+    case NODE_FIFO_W:
+        return exc_fifo_write_cmd(cmd);
+    case NODE_FIFO_R:
+        return exc_fifo_read_cmd(cmd);
+    case NODE_WORD_COUNT:
+        return exc_word_count_cmd(cmd);
+    case NODE_TXT_CAT:
+        return exc_txt_cat_cmd(cmd);
+    case NODE_TXT_APP:
+        return exc_txt_app_cmd(cmd);
+    default:
+        fprintf(stderr, "minibash: unknown command node type in %s\n", where);
+        return -1;
+    }
+}
+
 /**
  * 执行命令序列，按照顺序依次执行每个命令，不管前一个命令的结果如何。
  * 例如：`cmd1 ; cmd2 ; cmd3` 会先执行 cmd1 -> cmd2 -> cmd3。
@@ -808,43 +832,70 @@ static int exc_sequence_cmd(CommandLine *cmdline)
     {
         const Command *cmd = &cmdline->cmds[i];
 
-        // 根据 node_type 分发到对应的 exc_* 函数
-        switch (cmd->node_type)
-        {
-        case NODE_SIMPLE:
-        case NODE_BG:
-            last_rc = exc_single_cmd(cmd);
-            break;
-        case NODE_FIFO_W:
-            last_rc = exc_fifo_write_cmd(cmd);
-            break;
-        case NODE_FIFO_R:
-            last_rc = exc_fifo_read_cmd(cmd);
-            break;
-        case NODE_WORD_COUNT:
-            last_rc = exc_word_count_cmd(cmd);
-            break;
-        case NODE_TXT_CAT:
-            last_rc = exc_txt_cat_cmd(cmd);
-            break;
-        case NODE_TXT_APP:
-            last_rc = exc_txt_app_cmd(cmd);
-            break;
-        default:
-            fprintf(stderr, "minibash: unknown command node type in sequence\n");
-            last_rc = -1;
-            break;
-        }
+        last_rc = exc_dispatch_cmd(cmd, "sequence");
+        if (last_rc < 0)
+            return last_rc;
     }
 
     return last_rc;
 }
 
+/**
+ * 执行条件命令，按照左到右的顺序执行每个命令，根据连接符和前一个命令的结果决定是否执行下一个命令。
+ * 操作符必须全是 OP_AND 或 OP_OR，不能混合其他类型的操作符。
+ * 例如：`cmd1 && cmd2 || cmd3` 会先执行 cmd1，如果 cmd1 成功（返回码 0）则执行 cmd2，否则执行 cmd3。
+ * 1. 第一条命令无条件执行
+ * 2. 后续按短路规则从左到右执行
+ * 3. &&: 上一条成功(last_rc == 0)才执行下一条
+ * 4. ||: 上一条失败(last_rc != 0)才执行下一条
+ */
 static int exc_conditional_cmd(CommandLine *cmdline)
 {
-    (void)cmdline;
-    fprintf(stderr, "TODO: exc_conditional_cmd\n");
-    return -1;
+    int i;
+    int last_rc = 0;
+
+    // 基本合法性检查
+    if (cmdline == NULL || cmdline->cmd_count <= 0)
+        return -1;
+
+    if (cmdline->op_count != cmdline->cmd_count - 1)
+        return -1;
+
+    for (i = 0; i < cmdline->op_count; i++)
+    {
+        if (cmdline->ops[i] != OP_AND && cmdline->ops[i] != OP_OR)
+        {
+            fprintf(stderr, "minibash: exc_conditional_cmd only supports '&&' and '||' operators\n");
+            return -1;
+        }
+    }
+
+    /* Execute first command unconditionally. */
+    last_rc = exc_dispatch_cmd(&cmdline->cmds[0], "conditional");
+    if (last_rc < 0)
+        return last_rc;
+
+    /* Left-to-right short-circuit evaluation. */
+    for (i = 1; i < cmdline->cmd_count; i++)
+    {
+        bool should_run = false;
+        const Command *cmd = &cmdline->cmds[i];
+        OperatorType op = cmdline->ops[i - 1];
+
+        if (op == OP_AND)
+            should_run = (last_rc == 0);
+        else if (op == OP_OR)
+            should_run = (last_rc != 0);
+
+        if (!should_run)
+            continue;
+
+        last_rc = exc_dispatch_cmd(cmd, "conditional");
+        if (last_rc < 0)
+            return last_rc;
+    }
+
+    return last_rc;
 }
 
 static int exc_pipe_cmd(CommandLine *cmdline)
@@ -907,27 +958,7 @@ static int exc_parsed(CommandLine *cmdline)
 
     // 单命令直接根据 node_type 分发
     if (cmdline->cmd_count == 1)
-    {
-        switch (cmdline->cmds[0].node_type)
-        {
-        case NODE_SIMPLE:
-        case NODE_BG:
-            return exc_single_cmd(&cmdline->cmds[0]);
-        case NODE_FIFO_W:
-            return exc_fifo_write_cmd(&cmdline->cmds[0]);
-        case NODE_FIFO_R:
-            return exc_fifo_read_cmd(&cmdline->cmds[0]);
-        case NODE_WORD_COUNT:
-            return exc_word_count_cmd(&cmdline->cmds[0]);
-        case NODE_TXT_CAT:
-            return exc_txt_cat_cmd(&cmdline->cmds[0]);
-        case NODE_TXT_APP:
-            return exc_txt_app_cmd(&cmdline->cmds[0]);
-        default:
-            fprintf(stderr, "minibash: unknown single command node type\n");
-            return -1;
-        }
-    }
+        return exc_dispatch_cmd(&cmdline->cmds[0], "single");
 
     // 多命令需要根据连接符类型分发
     for (i = 0; i < cmdline->op_count; i++)
