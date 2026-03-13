@@ -1265,7 +1265,61 @@ static int execute_txt_append_both(CommandInfo *cmd_info)
 // 单词计数 #
 static int execute_word_count(CommandInfo *cmd_info)
 {
-    fprintf(stderr, "TODO execute_word_count: %s\n", cmd_info->argv[0]);
+    const char *filename = NULL;
+    FILE *fp;
+    int ch;
+    int in_word = 0;
+    int count = 0;
+
+    /* 支持两种形式：
+     * 1) # sample.txt   -> argv[0]="#", argv[1]="sample.txt"
+     * 2) #sample.txt    -> argv[0]="#sample.txt"
+     */
+    if (cmd_info->argc >= 2 && strcmp(cmd_info->argv[0], "#") == 0)
+    {
+        filename = cmd_info->argv[1];
+    }
+    else if (cmd_info->argc >= 1 && cmd_info->argv[0][0] == '#')
+    {
+        filename = cmd_info->argv[0] + 1;
+        while (*filename != '\0' && isspace((unsigned char)*filename))
+            filename++;
+    }
+
+    if (filename == NULL || filename[0] == '\0')
+    {
+        fprintf(stderr, "minibash: usage: # file.txt\n");
+        return -1;
+    }
+
+    if (!has_txt_extension(filename))
+    {
+        fprintf(stderr, "minibash: '#' requires a .txt file\n");
+        return -1;
+    }
+
+    fp = fopen(filename, "r");
+    if (fp == NULL)
+    {
+        perror(filename);
+        return -1;
+    }
+
+    while ((ch = fgetc(fp)) != EOF)
+    {
+        if (isspace((unsigned char)ch))
+        {
+            in_word = 0;
+        }
+        else if (!in_word)
+        {
+            in_word = 1;
+            count++;
+        }
+    }
+
+    fclose(fp);
+    printf("%d\n", count);
     return 0;
 }
 
