@@ -625,11 +625,132 @@ static int execute_conditional(char *line)
     return prev_ret;
 }
 
-// 普通管道
-static int execute_pipe_chain(CommandInfo *cmd_info)
+// 普通管道：按 '|' 拆分原始行，依次建立管道连接各子命令（最多 4 次管道）
+static int execute_pipe_chain(char *line)
 {
-    fprintf(stderr, "TODO execute_pipe_chain: %s\n", cmd_info->argv[0]);
-    return 0;
+    char buf[MAX_LINE];
+    char *segs[5]; /* 最多 4 个 '|' → 5 段 */
+    int nseg = 0;
+    char *p, *seg_start;
+
+    strncpy(buf, line, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+
+    /* 扫描时跳过 '|||'，只切单个 '|' */
+    p = buf;
+    seg_start = p;
+    while (*p != '\0')
+    {
+        if (p[0] == '|' && p[1] != '|')
+        {
+            if (nseg >= 4)
+            {
+                fprintf(stderr, "minibash: '|' supports at most 4 pipe operations\n");
+                return -1;
+            }
+            *p = '\0';
+            trim_inplace(seg_start);
+            segs[nseg++] = seg_start;
+            seg_start = p + 1;
+            p = seg_start;
+        }
+        else
+        {
+            p++;
+        }
+    }
+    trim_inplace(seg_start);
+    segs[nseg++] = seg_start;
+
+    if (nseg < 2)
+        return execute_simple_command(NULL); /* 不该到这里，保险处理 */
+
+    /* 为 nseg-1 对相邻命令建立 pipe */
+    int pipefds[4][2]; /* 最多 4 条 pipe */
+    int i;
+    for (i = 0; i < nseg - 1; i++)
+    {
+        if (pipe(pipefds[i]) < 0)
+        {
+            perror("pipe");
+            return -1;
+        }
+    }
+
+    pid_t pids[5];
+    for (i = 0; i < nseg; i++)
+    {
+        CommandInfo seg_cmd;
+        if (!resolve_command(segs[i], &seg_cmd))
+        {
+            /* 关闭已创建的所有 pipe 端口再退出 */
+            int j;
+            for (j = 0; j < nseg - 1; j++)
+            {
+                close(pipefds[j][0]);
+                close(pipefds[j][1]);
+            }
+            return -1;
+        }
+
+        pids[i] = fork();
+        if (pids[i] < 0)
+        {
+            perror("fork");
+            free_cmdinfo(&seg_cmd);
+            return -1;
+        }
+
+        if (pids[i] == 0)
+        {
+            /* 子进程：把上一段的读端接到 stdin */
+            if (i > 0)
+            {
+                dup2(pipefds[i - 1][0], STDIN_FILENO);
+            }
+            /* 把下一段的写端接到 stdout */
+            if (i < nseg - 1)
+            {
+                dup2(pipefds[i][1], STDOUT_FILENO);
+            }
+            /* 关闭所有 pipe 端口（子进程不需要保留） */
+            int j;
+            for (j = 0; j < nseg - 1; j++)
+            {
+                close(pipefds[j][0]);
+                close(pipefds[j][1]);
+            }
+            /* 处理可能存在的文件重定向 */
+            if (seg_cmd.infile != NULL)
+                setup_redirection_in(&seg_cmd);
+            if (seg_cmd.outfile != NULL)
+                setup_redirection_out(&seg_cmd);
+
+            execvp(seg_cmd.argv[0], seg_cmd.argv);
+            fprintf(stderr, "minibash: %s: %s\n", seg_cmd.argv[0], strerror(errno));
+            exit(127);
+        }
+
+        free_cmdinfo(&seg_cmd);
+    }
+
+    /* 父进程关闭所有 pipe 端口，等待所有子进程结束 */
+    for (i = 0; i < nseg - 1; i++)
+    {
+        close(pipefds[i][0]);
+        close(pipefds[i][1]);
+    }
+
+    int last_ret = 0;
+    for (i = 0; i < nseg; i++)
+    {
+        int status;
+        waitpid(pids[i], &status, 0);
+        if (i == nseg - 1)
+            last_ret = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    }
+
+    return last_ret;
 }
 
 // 反向管道
@@ -735,7 +856,7 @@ int main(void)
             execute_conditional(line);
             break;
         case PIPE_CHAIN:
-            execute_pipe_chain(&cmd_out);
+            execute_pipe_chain(line);
             break;
         case REVERSE_PIPE_CHAIN:
             execute_reverse_pipe_chain(&cmd_out);
