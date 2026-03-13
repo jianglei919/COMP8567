@@ -132,11 +132,6 @@ static CommandType resolve_command_type(char *line)
     if (strchr(line, ';') != NULL)
         return SEQUENTIAL;
 
-    /* '&&' or '||' conditional  –  note: check AFTER '|||' would be wrong, but
-     * '|||' does not contain '&&', so the order here is safe. */
-    if (strstr(line, "&&") != NULL || strstr(line, "||") != NULL)
-        return CONDITIONAL;
-
     /* '|||' FIFO  – must be before single '|' check */
     if (strstr(line, "|||") != NULL)
     {
@@ -144,6 +139,10 @@ static CommandType resolve_command_type(char *line)
             return FIFO_READ; /* |||cmd  */
         return FIFO_WRITE;    /* cmd|||  */
     }
+
+    /* '&&' or '||' conditional */
+    if (strstr(line, "&&") != NULL || strstr(line, "||") != NULL)
+        return CONDITIONAL;
 
     /* '~' reverse pipe */
     if (strchr(line, '~') != NULL)
@@ -875,17 +874,214 @@ static int execute_reverse_pipe_chain(char *line)
     return last_ret;
 }
 
-// FIFO管道写入
-static int execute_fifo_write(CommandInfo *cmd_info)
+// FIFO管道写入：cmd|||  将cmd输出写入公共FIFO
+static int execute_fifo_write(char *line)
 {
-    fprintf(stderr, "TODO execute_fifo_write: %s\n", cmd_info->argv[0]);
-    return 0;
+    char buf[MAX_LINE];
+    char *op;
+    char *cmd_part;
+    const char *home;
+    char dir1[PATH_MAX];
+    char dir2[PATH_MAX];
+    char fifo_path[PATH_MAX];
+
+    strncpy(buf, line, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+
+    op = strstr(buf, "|||");
+    if (op == NULL)
+    {
+        fprintf(stderr, "minibash: fifo write syntax error, expected cmd|||\n");
+        return -1;
+    }
+
+    *op = '\0';
+    cmd_part = buf;
+    trim_inplace(cmd_part);
+    if (cmd_part[0] == '\0')
+    {
+        fprintf(stderr, "minibash: fifo write requires a command before '|||'\n");
+        return -1;
+    }
+
+    home = getenv("HOME");
+    if (home == NULL)
+        home = ".";
+
+    if (strlen(home) + strlen("/Assignments") >= sizeof(dir1) ||
+        strlen(home) + strlen("/Assignments/Assignment3") >= sizeof(dir2) ||
+        strlen(home) + strlen("/Assignments/Assignment3/minibash_fifo") >= sizeof(fifo_path))
+    {
+        fprintf(stderr, "minibash: fifo path too long\n");
+        return -1;
+    }
+
+    snprintf(dir1, sizeof(dir1), "%s/Assignments", home);
+    snprintf(dir2, sizeof(dir2), "%s/Assignments/Assignment3", home);
+    snprintf(fifo_path, sizeof(fifo_path), "%s/minibash_fifo", dir2);
+
+    if (mkdir(dir1, 0755) < 0 && errno != EEXIST)
+    {
+        perror("mkdir Assignments");
+        return -1;
+    }
+    if (mkdir(dir2, 0755) < 0 && errno != EEXIST)
+    {
+        perror("mkdir Assignment3");
+        return -1;
+    }
+    if (mkfifo(fifo_path, 0666) < 0 && errno != EEXIST)
+    {
+        perror("mkfifo");
+        return -1;
+    }
+
+    CommandInfo cmd;
+    if (!resolve_command(cmd_part, &cmd))
+    {
+        return -1;
+    }
+
+    pid_t pid = fork();
+    if (pid < 0)
+    {
+        perror("fork");
+        free_cmdinfo(&cmd);
+        return -1;
+    }
+
+    if (pid == 0)
+    {
+        int fifo_fd = open(fifo_path, O_WRONLY);
+        if (fifo_fd < 0)
+        {
+            perror("open fifo for write");
+            exit(1);
+        }
+
+        if (dup2(fifo_fd, STDOUT_FILENO) < 0)
+        {
+            perror("dup2 fifo stdout");
+            close(fifo_fd);
+            exit(1);
+        }
+        close(fifo_fd);
+
+        if (cmd.infile != NULL)
+            setup_redirection_in(&cmd);
+
+        execvp(cmd.argv[0], cmd.argv);
+        fprintf(stderr, "minibash: %s: %s\n", cmd.argv[0], strerror(errno));
+        exit(127);
+    }
+
+    int status;
+    waitpid(pid, &status, 0);
+    free_cmdinfo(&cmd);
+    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 }
-// FIFO管道读取
-static int execute_fifo_read(CommandInfo *cmd_info)
+// FIFO管道读取：|||cmd  从公共FIFO读取并作为cmd的stdin
+static int execute_fifo_read(char *line)
 {
-    fprintf(stderr, "TODO execute_fifo_read: %s\n", cmd_info->argv[0]);
-    return 0;
+    char buf[MAX_LINE];
+    char *cmd_part;
+    const char *home;
+    char dir1[PATH_MAX];
+    char dir2[PATH_MAX];
+    char fifo_path[PATH_MAX];
+
+    strncpy(buf, line, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+
+    if (strncmp(buf, "|||", 3) != 0)
+    {
+        fprintf(stderr, "minibash: fifo read syntax error, expected |||cmd\n");
+        return -1;
+    }
+
+    cmd_part = buf + 3;
+    trim_inplace(cmd_part);
+    if (cmd_part[0] == '\0')
+    {
+        fprintf(stderr, "minibash: fifo read requires a command after '|||'\n");
+        return -1;
+    }
+
+    home = getenv("HOME");
+    if (home == NULL)
+        home = ".";
+
+    if (strlen(home) + strlen("/Assignments") >= sizeof(dir1) ||
+        strlen(home) + strlen("/Assignments/Assignment3") >= sizeof(dir2) ||
+        strlen(home) + strlen("/Assignments/Assignment3/minibash_fifo") >= sizeof(fifo_path))
+    {
+        fprintf(stderr, "minibash: fifo path too long\n");
+        return -1;
+    }
+
+    snprintf(dir1, sizeof(dir1), "%s/Assignments", home);
+    snprintf(dir2, sizeof(dir2), "%s/Assignments/Assignment3", home);
+    snprintf(fifo_path, sizeof(fifo_path), "%s/minibash_fifo", dir2);
+
+    if (mkdir(dir1, 0755) < 0 && errno != EEXIST)
+    {
+        perror("mkdir Assignments");
+        return -1;
+    }
+    if (mkdir(dir2, 0755) < 0 && errno != EEXIST)
+    {
+        perror("mkdir Assignment3");
+        return -1;
+    }
+    if (mkfifo(fifo_path, 0666) < 0 && errno != EEXIST)
+    {
+        perror("mkfifo");
+        return -1;
+    }
+
+    CommandInfo cmd;
+    if (!resolve_command(cmd_part, &cmd))
+    {
+        return -1;
+    }
+
+    pid_t pid = fork();
+    if (pid < 0)
+    {
+        perror("fork");
+        free_cmdinfo(&cmd);
+        return -1;
+    }
+
+    if (pid == 0)
+    {
+        int fifo_fd = open(fifo_path, O_RDONLY);
+        if (fifo_fd < 0)
+        {
+            perror("open fifo for read");
+            exit(1);
+        }
+
+        if (dup2(fifo_fd, STDIN_FILENO) < 0)
+        {
+            perror("dup2 fifo stdin");
+            close(fifo_fd);
+            exit(1);
+        }
+        close(fifo_fd);
+
+        if (cmd.outfile != NULL)
+            setup_redirection_out(&cmd);
+
+        execvp(cmd.argv[0], cmd.argv);
+        fprintf(stderr, "minibash: %s: %s\n", cmd.argv[0], strerror(errno));
+        exit(127);
+    }
+
+    int status;
+    waitpid(pid, &status, 0);
+    free_cmdinfo(&cmd);
+    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 }
 
 // 重定向
@@ -977,10 +1173,10 @@ int main(void)
             execute_reverse_pipe_chain(line);
             break;
         case FIFO_WRITE:
-            execute_fifo_write(&cmd_out);
+            execute_fifo_write(line);
             break;
         case FIFO_READ:
-            execute_fifo_read(&cmd_out);
+            execute_fifo_read(line);
             break;
         case REDIRECTION:
             execute_redirection(&cmd_out);
