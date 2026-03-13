@@ -753,11 +753,126 @@ static int execute_pipe_chain(char *line)
     return last_ret;
 }
 
-// 反向管道
-static int execute_reverse_pipe_chain(CommandInfo *cmd_info)
+// 反向管道：a ~ b ~ c 等价于 c | b | a
+static int execute_reverse_pipe_chain(char *line)
 {
-    fprintf(stderr, "TODO execute_reverse_pipe_chain: %s\n", cmd_info->argv[0]);
-    return 0;
+    char buf[MAX_LINE];
+    char *segs[5]; /* 最多 4 个 '~' -> 5 段 */
+    int nseg = 0;
+    char *saveptr = NULL;
+    char *segment;
+
+    strncpy(buf, line, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+
+    segment = strtok_r(buf, "~", &saveptr);
+    while (segment != NULL)
+    {
+        trim_inplace(segment);
+        if (segment[0] != '\0')
+        {
+            if (nseg >= 5)
+            {
+                fprintf(stderr, "minibash: '~' supports at most 4 pipe operations\n");
+                return -1;
+            }
+            segs[nseg++] = segment;
+        }
+        segment = strtok_r(NULL, "~", &saveptr);
+    }
+
+    if (nseg < 2)
+    {
+        fprintf(stderr, "minibash: reverse pipe requires at least 2 commands\n");
+        return -1;
+    }
+
+    /* reverse in-place */
+    for (int i = 0; i < nseg / 2; i++)
+    {
+        char *tmp = segs[i];
+        segs[i] = segs[nseg - 1 - i];
+        segs[nseg - 1 - i] = tmp;
+    }
+
+    int pipefds[4][2];
+    for (int i = 0; i < nseg - 1; i++)
+    {
+        if (pipe(pipefds[i]) < 0)
+        {
+            perror("pipe");
+            return -1;
+        }
+    }
+
+    pid_t pids[5];
+    for (int i = 0; i < nseg; i++)
+    {
+        CommandInfo seg_cmd;
+        if (!resolve_command(segs[i], &seg_cmd))
+        {
+            for (int j = 0; j < nseg - 1; j++)
+            {
+                close(pipefds[j][0]);
+                close(pipefds[j][1]);
+            }
+            return -1;
+        }
+
+        pids[i] = fork();
+        if (pids[i] < 0)
+        {
+            perror("fork");
+            free_cmdinfo(&seg_cmd);
+            return -1;
+        }
+
+        if (pids[i] == 0)
+        {
+            if (i > 0)
+            {
+                dup2(pipefds[i - 1][0], STDIN_FILENO);
+            }
+            if (i < nseg - 1)
+            {
+                dup2(pipefds[i][1], STDOUT_FILENO);
+            }
+
+            for (int j = 0; j < nseg - 1; j++)
+            {
+                close(pipefds[j][0]);
+                close(pipefds[j][1]);
+            }
+
+            if (seg_cmd.infile != NULL)
+                setup_redirection_in(&seg_cmd);
+            if (seg_cmd.outfile != NULL)
+                setup_redirection_out(&seg_cmd);
+
+            execvp(seg_cmd.argv[0], seg_cmd.argv);
+            fprintf(stderr, "minibash: %s: %s\n", seg_cmd.argv[0], strerror(errno));
+            exit(127);
+        }
+
+        free_cmdinfo(&seg_cmd);
+    }
+
+    for (int i = 0; i < nseg - 1; i++)
+    {
+        close(pipefds[i][0]);
+        close(pipefds[i][1]);
+    }
+
+    int last_ret = 0;
+    for (int i = 0; i < nseg; i++)
+    {
+        int status;
+        waitpid(pids[i], &status, 0);
+        if (i == nseg - 1)
+            last_ret = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    }
+
+    return last_ret;
 }
 
 // FIFO管道写入
@@ -859,7 +974,7 @@ int main(void)
             execute_pipe_chain(line);
             break;
         case REVERSE_PIPE_CHAIN:
-            execute_reverse_pipe_chain(&cmd_out);
+            execute_reverse_pipe_chain(line);
             break;
         case FIFO_WRITE:
             execute_fifo_write(&cmd_out);
