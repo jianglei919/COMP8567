@@ -1324,9 +1324,79 @@ static int execute_word_count(CommandInfo *cmd_info)
 }
 
 // 文本拼接 +
-static int execute_txt_concat(CommandInfo *cmd_info)
+static int execute_txt_concat(char *line)
 {
-    fprintf(stderr, "TODO execute_txt_concat: %s\n", cmd_info->argv[0]);
+    char buf[MAX_LINE];
+    char *saveptr = NULL;
+    char *part;
+    int op_count = 0;
+    int file_count = 0;
+
+    strncpy(buf, line, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+
+    part = strtok_r(buf, "+", &saveptr);
+    while (part != NULL)
+    {
+        FILE *fp;
+        char io_buf[1024];
+        size_t n;
+
+        trim_inplace(part);
+        if (part[0] == '\0')
+        {
+            fprintf(stderr, "minibash: invalid '+' expression\n");
+            return -1;
+        }
+
+        if (!has_txt_extension(part))
+        {
+            fprintf(stderr, "minibash: '+' requires .txt files only\n");
+            return -1;
+        }
+
+        file_count++;
+        if (file_count > 5)
+        {
+            fprintf(stderr, "minibash: '+' supports at most 4 operations\n");
+            return -1;
+        }
+
+        fp = fopen(part, "rb");
+        if (fp == NULL)
+        {
+            perror(part);
+            return -1;
+        }
+
+        while ((n = fread(io_buf, 1, sizeof(io_buf), fp)) > 0)
+        {
+            if (fwrite(io_buf, 1, n, stdout) != n)
+            {
+                perror("fwrite");
+                fclose(fp);
+                return -1;
+            }
+        }
+        if (ferror(fp))
+        {
+            perror("fread");
+            fclose(fp);
+            return -1;
+        }
+
+        fclose(fp);
+        part = strtok_r(NULL, "+", &saveptr);
+        if (part != NULL)
+            op_count++;
+    }
+
+    if (file_count < 2 || op_count < 1)
+    {
+        fprintf(stderr, "minibash: '+' requires at least two .txt files\n");
+        return -1;
+    }
+
     return 0;
 }
 
@@ -1401,7 +1471,7 @@ int main(void)
             execute_word_count(&cmd_out);
             break;
         case TXT_CONCAT:
-            execute_txt_concat(&cmd_out);
+            execute_txt_concat(line);
             break;
         case SIMPLE_BACKGROUND:
             execute_background_command(&cmd_out);
