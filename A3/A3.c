@@ -1096,10 +1096,169 @@ static int execute_redirection(CommandInfo *cmd_info)
     return run_cmd(cmd_info, true, -1, -1);
 }
 
+static bool has_txt_extension(const char *name)
+{
+    size_t n;
+    if (name == NULL)
+        return false;
+    n = strlen(name);
+    return (n >= 4 && strcmp(name + n - 4, ".txt") == 0);
+}
+
+static int read_all_bytes(const char *path, char **out_buf, size_t *out_len)
+{
+    FILE *fp;
+    long sz;
+    char *buf;
+
+    *out_buf = NULL;
+    *out_len = 0;
+
+    fp = fopen(path, "rb");
+    if (fp == NULL)
+    {
+        perror(path);
+        return -1;
+    }
+
+    if (fseek(fp, 0, SEEK_END) != 0)
+    {
+        fclose(fp);
+        perror("fseek");
+        return -1;
+    }
+
+    sz = ftell(fp);
+    if (sz < 0)
+    {
+        fclose(fp);
+        perror("ftell");
+        return -1;
+    }
+
+    if (fseek(fp, 0, SEEK_SET) != 0)
+    {
+        fclose(fp);
+        perror("fseek");
+        return -1;
+    }
+
+    if (sz == 0)
+    {
+        fclose(fp);
+        return 0;
+    }
+
+    buf = (char *)malloc((size_t)sz);
+    if (buf == NULL)
+    {
+        fclose(fp);
+        perror("malloc");
+        return -1;
+    }
+
+    if (fread(buf, 1, (size_t)sz, fp) != (size_t)sz)
+    {
+        free(buf);
+        fclose(fp);
+        perror("fread");
+        return -1;
+    }
+
+    fclose(fp);
+    *out_buf = buf;
+    *out_len = (size_t)sz;
+    return 0;
+}
+
 // 文本双向追加 ++
 static int execute_txt_append_both(CommandInfo *cmd_info)
 {
-    fprintf(stderr, "TODO execute_txt_append_both: %s\n", cmd_info->argv[0]);
+    char *f1 = NULL;
+    char *f2 = NULL;
+    char *buf1 = NULL;
+    char *buf2 = NULL;
+    size_t len1 = 0;
+    size_t len2 = 0;
+    FILE *fp;
+
+    if (cmd_info->argc == 3 && strcmp(cmd_info->argv[1], "++") == 0)
+    {
+        f1 = cmd_info->argv[0];
+        f2 = cmd_info->argv[2];
+    }
+    else if (cmd_info->argc == 1)
+    {
+        char *op = strstr(cmd_info->argv[0], "++");
+        if (op != NULL)
+        {
+            *op = '\0';
+            f1 = cmd_info->argv[0];
+            f2 = op + 2;
+            trim_inplace(f1);
+            trim_inplace(f2);
+        }
+    }
+
+    if (f1 == NULL || f2 == NULL || f1[0] == '\0' || f2[0] == '\0')
+    {
+        fprintf(stderr, "minibash: usage: file1.txt ++ file2.txt\n");
+        return -1;
+    }
+
+    if (!has_txt_extension(f1) || !has_txt_extension(f2))
+    {
+        fprintf(stderr, "minibash: '++' requires two .txt files\n");
+        return -1;
+    }
+
+    /* 先读两边原始内容，再执行双向追加，避免先写后读污染数据。 */
+    if (read_all_bytes(f1, &buf1, &len1) < 0)
+        return -1;
+    if (read_all_bytes(f2, &buf2, &len2) < 0)
+    {
+        free(buf1);
+        return -1;
+    }
+
+    fp = fopen(f1, "ab");
+    if (fp == NULL)
+    {
+        perror(f1);
+        free(buf1);
+        free(buf2);
+        return -1;
+    }
+    if (len2 > 0 && fwrite(buf2, 1, len2, fp) != len2)
+    {
+        perror("fwrite");
+        fclose(fp);
+        free(buf1);
+        free(buf2);
+        return -1;
+    }
+    fclose(fp);
+
+    fp = fopen(f2, "ab");
+    if (fp == NULL)
+    {
+        perror(f2);
+        free(buf1);
+        free(buf2);
+        return -1;
+    }
+    if (len1 > 0 && fwrite(buf1, 1, len1, fp) != len1)
+    {
+        perror("fwrite");
+        fclose(fp);
+        free(buf1);
+        free(buf2);
+        return -1;
+    }
+    fclose(fp);
+
+    free(buf1);
+    free(buf2);
     return 0;
 }
 
