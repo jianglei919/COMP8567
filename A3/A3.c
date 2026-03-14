@@ -19,6 +19,10 @@
 #define MAX_TOKENS 128
 #define MAX_CMDS 5
 
+#define FIFO_DIR_L1 "Assignments"
+#define FIFO_DIR_L2 "Assignment3"
+#define FIFO_FILE_NAME "minibash_fifo"
+
 pid_t bg_pids[MAX_BG];
 int bg_count;
 
@@ -394,6 +398,52 @@ static int append_buffer_to_file(const char *path, const char *buf, size_t len)
     }
 
     fclose(fp);
+    return 0;
+}
+
+// 构建并确保公共 FIFO 存在，成功时返回 0，并写出 fifo_path。
+static int ensure_common_fifo(char *fifo_path, size_t fifo_path_sz)
+{
+    const char *home;
+    char dir1[PATH_MAX];
+    char dir2[PATH_MAX];
+
+    if (fifo_path == NULL || fifo_path_sz == 0)
+        return -1;
+
+    home = getenv("HOME");
+    if (home == NULL || home[0] == '\0')
+    {
+        fprintf(stderr, "minibash: HOME is not set\n");
+        return -1;
+    }
+
+    if (snprintf(dir1, sizeof(dir1), "%s/%s", home, FIFO_DIR_L1) >= (int)sizeof(dir1) ||
+        snprintf(dir2, sizeof(dir2), "%s/%s/%s", home, FIFO_DIR_L1, FIFO_DIR_L2) >= (int)sizeof(dir2) ||
+        snprintf(fifo_path, fifo_path_sz, "%s/%s/%s/%s", home, FIFO_DIR_L1, FIFO_DIR_L2, FIFO_FILE_NAME) >= (int)fifo_path_sz)
+    {
+        fprintf(stderr, "minibash: fifo path too long\n");
+        return -1;
+    }
+
+    if (mkdir(dir1, 0755) < 0 && errno != EEXIST)
+    {
+        perror(dir1);
+        return -1;
+    }
+
+    if (mkdir(dir2, 0755) < 0 && errno != EEXIST)
+    {
+        perror(dir2);
+        return -1;
+    }
+
+    if (mkfifo(fifo_path, 0666) < 0 && errno != EEXIST)
+    {
+        perror(fifo_path);
+        return -1;
+    }
+
     return 0;
 }
 
@@ -1168,11 +1218,51 @@ static int exc_reverse_pipe_cmd(CommandLine *cmdline)
     return run_pipe(cmdline, OP_REVERSE_PIPE, "exc_reverse_pipe_cmd", true);
 }
 
+/**
+ * exc_fifo_write_cmd – 执行 FIFO 写命令：cmd >|||
+ * 策略：
+ * 1. 参数校验：||| 写端必须有可执行命令（cmd->argc > 0），且不能是内置命令
+ * 2. FIFO 路径：~/Assignments/Assignment3/minibash_fifo
+ * 3. 创建 FIFO：如果不存在则创建，权限 0666
+ * 4. 非阻塞打开写端（O_WRONLY | O_NONBLOCK）：
+ *      无读端时不会卡死 shell
+ *      给出明确错误提示
+ * 5. 重定向：调用 run_cmd(cmd, ..., stdout_fd=fifo_fd) 把命令输出写入 FIFO
+ * 6. 错误处理：参数不对、内置命令、FIFO 创建/打开失败都会报错并返回 -1
+ */
 static int exc_fifo_write_cmd(const Command *cmd)
 {
-    (void)cmd;
-    fprintf(stderr, "TODO: exc_fifo_write_cmd\n");
-    return -1;
+    char fifo_path[PATH_MAX];
+    int fd;
+    bool foreground;
+
+    if (cmd == NULL || cmd->argc <= 0)
+    {
+        fprintf(stderr, "minibash: ||| write requires a command\n");
+        return -1;
+    }
+
+    if (ensure_common_fifo(fifo_path, sizeof(fifo_path)) < 0)
+        return -1;
+
+    // 非阻塞打开写端：若当前没有读端，直接返回错误而不是挂住 shell。
+    fd = open(fifo_path, O_WRONLY | O_NONBLOCK);
+    if (fd < 0)
+    {
+        if (errno == ENXIO)
+            fprintf(stderr, "minibash: no FIFO reader available (use |||cmd in another shell first)\n");
+        else
+            perror(fifo_path);
+        return -1;
+    }
+
+    foreground = !cmd->run_in_background;
+    // 把当前命令标准输出重定向到公共 FIFO。
+    {
+        int rc = run_cmd(cmd, foreground, -1, fd);
+        close(fd);
+        return rc;
+    }
 }
 
 static int exc_fifo_read_cmd(const Command *cmd)
