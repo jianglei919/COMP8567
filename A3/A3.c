@@ -846,217 +846,6 @@ static int run_cmd(const Command *cmd_info, bool foreground, int stdin_fd, int s
     }
 }
 
-static int exc_builtin(const Command *cmd)
-{
-    const char *name = cmd->argv[0];
-
-    if (strcmp(name, "killmb") == 0)
-    {
-        printf("minibash: exiting.\n");
-        exit(0);
-    }
-
-    if (strcmp(name, "killallmb") == 0)
-    {
-        fprintf(stderr, "TODO: killallmb\n");
-        return 0;
-    }
-
-    if (strcmp(name, "pstop") == 0)
-    {
-        if (last_bg_pid == -1)
-            fprintf(stderr, "minibash: no background process to stop.\n");
-        else if (kill(last_bg_pid, SIGSTOP) < 0)
-            perror("pstop");
-        else
-        {
-            last_stopped_pid = last_bg_pid;
-            printf("[pstop] stopped pid %d\n", (int)last_bg_pid);
-        }
-        return 0;
-    }
-
-    if (strcmp(name, "cont") == 0)
-    {
-        if (last_stopped_pid == -1)
-            fprintf(stderr, "minibash: no stopped process to continue.\n");
-        else if (kill(last_stopped_pid, SIGCONT) < 0)
-            perror("cont");
-        else
-        {
-            int s;
-            printf("[cont] continuing pid %d in foreground\n", (int)last_stopped_pid);
-            waitpid(last_stopped_pid, &s, 0);
-            last_stopped_pid = -1;
-        }
-        return 0;
-    }
-
-    if (strcmp(name, "numbg") == 0)
-    {
-        printf("Background processes: %d\n", bg_count);
-        return 0;
-    }
-
-    if (strcmp(name, "killbp") == 0)
-    {
-        int i;
-        for (i = 0; i < bg_count; i++)
-        {
-            if (kill(bg_pids[i], SIGKILL) < 0)
-                perror("killbp");
-            else
-                printf("[killbp] killed pid %d\n", (int)bg_pids[i]);
-        }
-        bg_count = 0;
-        return 0;
-    }
-
-    return -1;
-}
-
-// 执行单个命令，处理内置命令和外部命令
-static int exc_single_cmd(const Command *cmd)
-{
-    if (cmd->argc <= 0)
-        return -1;
-
-    if (is_builtin(cmd->argv[0]))
-        return exc_builtin(cmd);
-
-    bool foreground = !cmd->run_in_background;
-    return run_cmd(cmd, foreground, -1, -1);
-}
-
-static int exc_fifo_write_cmd(const Command *cmd);
-static int exc_fifo_read_cmd(const Command *cmd);
-static int exc_word_count_cmd(const Command *cmd);
-static int exc_txt_cat_cmd(const Command *cmd);
-static int exc_txt_app_cmd(const Command *cmd);
-
-// 根据命令节点类型(NodeType)分发到对应的执行函数
-static int do_dispatch_cmd(const Command *cmd, const char *where)
-{
-    switch (cmd->node_type)
-    {
-    case NODE_SIMPLE:
-    case NODE_BG:
-        return exc_single_cmd(cmd);
-    case NODE_FIFO_W:
-        return exc_fifo_write_cmd(cmd);
-    case NODE_FIFO_R:
-        return exc_fifo_read_cmd(cmd);
-    case NODE_WORD_COUNT:
-        return exc_word_count_cmd(cmd);
-    case NODE_TXT_CAT:
-        return exc_txt_cat_cmd(cmd);
-    case NODE_TXT_APP:
-        return exc_txt_app_cmd(cmd);
-    default:
-        fprintf(stderr, "minibash: unknown command node type in %s\n", where);
-        return -1;
-    }
-}
-
-/**
- * 执行命令序列，按照顺序依次执行每个命令，不管前一个命令的结果如何。
- * 例如：`cmd1 ; cmd2 ; cmd3` 会先执行 cmd1 -> cmd2 -> cmd3。
- * 1. 校验 cmdline 合法性
- * 2. 校验这条命令链确实是纯 ;（OP_SEQ）序列
- * 3. 按顺序遍历每个 Command
- * 4. 用 switch (cmd->node_type) 分发到对应 exc_* 函数
- * 5. 返回最后一个命令的退出码
- */
-static int exc_sequence_cmd(CommandLine *cmdline)
-{
-    int i;
-    int last_rc = 0; // 最后一个命令的返回码
-
-    if (cmdline == NULL || cmdline->cmd_count <= 0)
-        return -1;
-
-    if (cmdline->op_count != cmdline->cmd_count - 1)
-        return -1;
-
-    for (i = 0; i < cmdline->op_count; i++)
-    {
-        if (cmdline->ops[i] != OP_SEQ)
-        {
-            fprintf(stderr, "minibash: exc_sequence_cmd only supports ';' operators\n");
-            return -1;
-        }
-    }
-
-    for (i = 0; i < cmdline->cmd_count; i++)
-    {
-        const Command *cmd = &cmdline->cmds[i];
-
-        last_rc = do_dispatch_cmd(cmd, "sequence");
-        if (last_rc < 0)
-            return last_rc;
-    }
-
-    return last_rc;
-}
-
-/**
- * 执行条件命令，按照左到右的顺序执行每个命令，根据连接符和前一个命令的结果决定是否执行下一个命令。
- * 操作符必须全是 OP_AND 或 OP_OR，不能混合其他类型的操作符。
- * 例如：`cmd1 && cmd2 || cmd3` 会先执行 cmd1，如果 cmd1 成功（返回码 0）则执行 cmd2，否则执行 cmd3。
- * 1. 第一条命令无条件执行
- * 2. 后续按短路规则从左到右执行
- * 3. &&: 上一条成功(last_rc == 0)才执行下一条
- * 4. ||: 上一条失败(last_rc != 0)才执行下一条
- */
-static int exc_conditional_cmd(CommandLine *cmdline)
-{
-    int i;
-    int last_rc = 0;
-
-    // 基本合法性检查
-    if (cmdline == NULL || cmdline->cmd_count <= 0)
-        return -1;
-
-    if (cmdline->op_count != cmdline->cmd_count - 1)
-        return -1;
-
-    for (i = 0; i < cmdline->op_count; i++)
-    {
-        if (cmdline->ops[i] != OP_AND && cmdline->ops[i] != OP_OR)
-        {
-            fprintf(stderr, "minibash: exc_conditional_cmd only supports '&&' and '||' operators\n");
-            return -1;
-        }
-    }
-
-    /* Execute first command unconditionally. */
-    last_rc = do_dispatch_cmd(&cmdline->cmds[0], "conditional");
-    if (last_rc < 0)
-        return last_rc;
-
-    /* Left-to-right short-circuit evaluation. */
-    for (i = 1; i < cmdline->cmd_count; i++)
-    {
-        bool should_run = false;
-        const Command *cmd = &cmdline->cmds[i];
-        OperatorType op = cmdline->ops[i - 1];
-
-        if (op == OP_AND)
-            should_run = (last_rc == 0);
-        else if (op == OP_OR)
-            should_run = (last_rc != 0);
-
-        if (!should_run)
-            continue;
-
-        last_rc = do_dispatch_cmd(cmd, "conditional");
-        if (last_rc < 0)
-            return last_rc;
-    }
-
-    return last_rc;
-}
-
 /*
  * run_pipe – 统一处理正向管道(|)和反向管道(~)
  *
@@ -1204,6 +993,220 @@ static int run_pipe(CommandLine *cmdline, OperatorType expected_op, const char *
     }
 
     return last_status;
+}
+
+static int exc_builtin_cmd(const Command *cmd);
+static int exc_single_cmd(const Command *cmd);
+static int exc_fifo_write_cmd(const Command *cmd);
+static int exc_fifo_read_cmd(const Command *cmd);
+static int exc_word_count_cmd(const Command *cmd);
+static int exc_txt_cat_cmd(const Command *cmd);
+static int exc_txt_app_cmd(const Command *cmd);
+
+// 根据命令节点类型(NodeType)分发到对应的执行函数
+static int do_dispatch_cmd(const Command *cmd, const char *where)
+{
+    switch (cmd->node_type)
+    {
+    case NODE_SIMPLE:
+    case NODE_BG:
+        return exc_single_cmd(cmd);
+    case NODE_FIFO_W:
+        return exc_fifo_write_cmd(cmd);
+    case NODE_FIFO_R:
+        return exc_fifo_read_cmd(cmd);
+    case NODE_WORD_COUNT:
+        return exc_word_count_cmd(cmd);
+    case NODE_TXT_CAT:
+        return exc_txt_cat_cmd(cmd);
+    case NODE_TXT_APP:
+        return exc_txt_app_cmd(cmd);
+    default:
+        fprintf(stderr, "minibash: unknown command node type in %s\n", where);
+        return -1;
+    }
+}
+
+// 执行内置命令，返回 0 表示成功执行了内置命令，负数表示不是内置命令或执行失败
+static int exc_builtin_cmd(const Command *cmd)
+{
+    const char *name = cmd->argv[0];
+
+    if (strcmp(name, "killmb") == 0)
+    {
+        printf("minibash: exiting.\n");
+        exit(0);
+    }
+
+    if (strcmp(name, "killallmb") == 0)
+    {
+        fprintf(stderr, "TODO: killallmb\n");
+        return 0;
+    }
+
+    if (strcmp(name, "pstop") == 0)
+    {
+        if (last_bg_pid == -1)
+            fprintf(stderr, "minibash: no background process to stop.\n");
+        else if (kill(last_bg_pid, SIGSTOP) < 0)
+            perror("pstop");
+        else
+        {
+            last_stopped_pid = last_bg_pid;
+            printf("[pstop] stopped pid %d\n", (int)last_bg_pid);
+        }
+        return 0;
+    }
+
+    if (strcmp(name, "cont") == 0)
+    {
+        if (last_stopped_pid == -1)
+            fprintf(stderr, "minibash: no stopped process to continue.\n");
+        else if (kill(last_stopped_pid, SIGCONT) < 0)
+            perror("cont");
+        else
+        {
+            int s;
+            printf("[cont] continuing pid %d in foreground\n", (int)last_stopped_pid);
+            waitpid(last_stopped_pid, &s, 0);
+            last_stopped_pid = -1;
+        }
+        return 0;
+    }
+
+    if (strcmp(name, "numbg") == 0)
+    {
+        printf("Background processes: %d\n", bg_count);
+        return 0;
+    }
+
+    if (strcmp(name, "killbp") == 0)
+    {
+        int i;
+        for (i = 0; i < bg_count; i++)
+        {
+            if (kill(bg_pids[i], SIGKILL) < 0)
+                perror("killbp");
+            else
+                printf("[killbp] killed pid %d\n", (int)bg_pids[i]);
+        }
+        bg_count = 0;
+        return 0;
+    }
+
+    return -1;
+}
+
+// 执行单个命令，处理内置命令和外部命令
+static int exc_single_cmd(const Command *cmd)
+{
+    if (cmd->argc <= 0)
+        return -1;
+
+    if (is_builtin(cmd->argv[0]))
+        return exc_builtin_cmd(cmd);
+
+    bool foreground = !cmd->run_in_background;
+    return run_cmd(cmd, foreground, -1, -1);
+}
+
+/**
+ * 执行命令序列，按照顺序依次执行每个命令，不管前一个命令的结果如何。
+ * 例如：`cmd1 ; cmd2 ; cmd3` 会先执行 cmd1 -> cmd2 -> cmd3。
+ * 1. 校验 cmdline 合法性
+ * 2. 校验这条命令链确实是纯 ;（OP_SEQ）序列
+ * 3. 按顺序遍历每个 Command
+ * 4. 用 switch (cmd->node_type) 分发到对应 exc_* 函数
+ * 5. 返回最后一个命令的退出码
+ */
+static int exc_sequence_cmd(CommandLine *cmdline)
+{
+    int i;
+    int last_rc = 0; // 最后一个命令的返回码
+
+    if (cmdline == NULL || cmdline->cmd_count <= 0)
+        return -1;
+
+    if (cmdline->op_count != cmdline->cmd_count - 1)
+        return -1;
+
+    for (i = 0; i < cmdline->op_count; i++)
+    {
+        if (cmdline->ops[i] != OP_SEQ)
+        {
+            fprintf(stderr, "minibash: exc_sequence_cmd only supports ';' operators\n");
+            return -1;
+        }
+    }
+
+    for (i = 0; i < cmdline->cmd_count; i++)
+    {
+        const Command *cmd = &cmdline->cmds[i];
+
+        last_rc = do_dispatch_cmd(cmd, "sequence");
+        if (last_rc < 0)
+            return last_rc;
+    }
+
+    return last_rc;
+}
+
+/**
+ * 执行条件命令，按照左到右的顺序执行每个命令，根据连接符和前一个命令的结果决定是否执行下一个命令。
+ * 操作符必须全是 OP_AND 或 OP_OR，不能混合其他类型的操作符。
+ * 例如：`cmd1 && cmd2 || cmd3` 会先执行 cmd1，如果 cmd1 成功（返回码 0）则执行 cmd2，否则执行 cmd3。
+ * 1. 第一条命令无条件执行
+ * 2. 后续按短路规则从左到右执行
+ * 3. &&: 上一条成功(last_rc == 0)才执行下一条
+ * 4. ||: 上一条失败(last_rc != 0)才执行下一条
+ */
+static int exc_conditional_cmd(CommandLine *cmdline)
+{
+    int i;
+    int last_rc = 0;
+
+    // 基本合法性检查
+    if (cmdline == NULL || cmdline->cmd_count <= 0)
+        return -1;
+
+    if (cmdline->op_count != cmdline->cmd_count - 1)
+        return -1;
+
+    for (i = 0; i < cmdline->op_count; i++)
+    {
+        if (cmdline->ops[i] != OP_AND && cmdline->ops[i] != OP_OR)
+        {
+            fprintf(stderr, "minibash: exc_conditional_cmd only supports '&&' and '||' operators\n");
+            return -1;
+        }
+    }
+
+    /* Execute first command unconditionally. */
+    last_rc = do_dispatch_cmd(&cmdline->cmds[0], "conditional");
+    if (last_rc < 0)
+        return last_rc;
+
+    /* Left-to-right short-circuit evaluation. */
+    for (i = 1; i < cmdline->cmd_count; i++)
+    {
+        bool should_run = false;
+        const Command *cmd = &cmdline->cmds[i];
+        OperatorType op = cmdline->ops[i - 1];
+
+        if (op == OP_AND)
+            should_run = (last_rc == 0);
+        else if (op == OP_OR)
+            should_run = (last_rc != 0);
+
+        if (!should_run)
+            continue;
+
+        last_rc = do_dispatch_cmd(cmd, "conditional");
+        if (last_rc < 0)
+            return last_rc;
+    }
+
+    return last_rc;
 }
 
 /*
@@ -1496,7 +1499,7 @@ static int exc_txt_app_cmd(const Command *cmd)
 }
 
 // 根据解析结果中的命令类型调用不同的执行函数
-static int exc_parsed(CommandLine *cmdline)
+static int do_parsed(CommandLine *cmdline)
 {
     int i;
     ExecType dispatch = EXEC_SINGLE;
@@ -1619,7 +1622,7 @@ int main(void)
         }
 
         // 这里根据 parsed 中的命令类型调用不同的执行函数
-        exc_parsed(&parsed);
+        do_parsed(&parsed);
 
         // 释放解析结果中分配的内存
         free_parsed_command_line(&parsed);
