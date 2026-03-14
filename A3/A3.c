@@ -130,6 +130,7 @@ typedef enum ExecType
     EXEC_INVALID       // 不支持的混合操作符组合
 } ExecType;
 
+// 解析错误码
 typedef enum ParseErrorCode
 {
     PARSE_ERR_INVALID_INPUT = -1,
@@ -185,6 +186,7 @@ static void trim_inplace(char *s)
     s[j] = '\0';
 }
 
+// 丢弃输入行剩余的内容，直到遇到换行符或 EOF
 static void discard_rest_of_line(void)
 {
     int ch;
@@ -250,6 +252,7 @@ static void bg_add(pid_t pid)
     }
 }
 
+// 检查命令名是否是内置命令
 static bool is_builtin(const char *name)
 {
     int i;
@@ -259,6 +262,7 @@ static bool is_builtin(const char *name)
     return false;
 }
 
+// 把一个 token 压入 token 数组，返回 0 成功，负数表示错误
 static int push_token(Token *tokens, int max_tokens, int *count, TokType type, const char *text)
 {
     if (*count >= max_tokens - 1)
@@ -279,12 +283,14 @@ static int push_token(Token *tokens, int max_tokens, int *count, TokType type, c
     return 0;
 }
 
+// 判断 token 类型是否是命令连接符（|、||、|||、&&、;、~ 或 EOF）
 static bool is_command_connector(TokType type)
 {
     return type == TOK_PIPE || type == TOK_DAMP || type == TOK_DPIPE ||
            type == TOK_SEMI || type == TOK_TILDE || type == TOK_EOF;
 }
 
+// 追加一个参数到 Command 结构的 argv 中，返回 0 成功，负数表示错误
 static int append_command_arg(Command *cmd, const char *text)
 {
     if (cmd->argc >= MAX_ARGC)
@@ -426,18 +432,21 @@ static int ensure_common_fifo(char *fifo_path, size_t fifo_path_sz)
         return -1;
     }
 
+    // dir1 = ~/Assignments
     if (mkdir(dir1, 0755) < 0 && errno != EEXIST)
     {
         perror(dir1);
         return -1;
     }
 
+    // dir2 = ~/Assignments/Assignment3
     if (mkdir(dir2, 0755) < 0 && errno != EEXIST)
     {
         perror(dir2);
         return -1;
     }
 
+    // fifo_path = ~/Assignments/Assignment3/minibash_fifo
     if (mkfifo(fifo_path, 0666) < 0 && errno != EEXIST)
     {
         perror(fifo_path);
@@ -1265,11 +1274,46 @@ static int exc_fifo_write_cmd(const Command *cmd)
     }
 }
 
+/**
+ * exc_fifo_read_cmd – 执行 FIFO 读命令：cmd <|||
+ * 策略：
+ * 1. 参数校验：||| 读端必须有可执行命令（cmd->argc > 0），且不能是内置命令
+ * 2. FIFO 路径：~/Assignments/Assignment3/minibash_fifo， 调用 ensure_common_fifo(...) 获取路径
+ * 3. 打开 FIFO 读端：open(fifo_path, O_RDONLY)（阻塞模式），没有写端时等待数据到来
+ * 4. 执行命令：run_cmd(cmd, foreground, fifo_fd, -1)，把 FIFO 接到命令 stdin
+ * 5. 清理：父进程关闭 fd
+ * 6. 错误处理：参数不对、内置命令、FIFO 创建/打开失败都会报错并返回
+ */
 static int exc_fifo_read_cmd(const Command *cmd)
 {
-    (void)cmd;
-    fprintf(stderr, "TODO: exc_fifo_read_cmd\n");
-    return -1;
+    char fifo_path[PATH_MAX];
+    int fd;
+    bool foreground;
+
+    if (cmd == NULL || cmd->argc <= 0)
+    {
+        fprintf(stderr, "minibash: ||| read requires a command\n");
+        return -1;
+    }
+
+    if (ensure_common_fifo(fifo_path, sizeof(fifo_path)) < 0)
+        return -1;
+
+    // 读端使用阻塞打开：没有写端时等待数据到来。
+    fd = open(fifo_path, O_RDONLY);
+    if (fd < 0)
+    {
+        perror(fifo_path);
+        return -1;
+    }
+
+    foreground = !cmd->run_in_background;
+    // 把公共 FIFO 作为当前命令的标准输入。
+    {
+        int rc = run_cmd(cmd, foreground, fd, -1);
+        close(fd);
+        return rc;
+    }
 }
 
 /**
