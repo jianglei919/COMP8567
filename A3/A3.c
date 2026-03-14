@@ -1082,11 +1082,62 @@ static int exc_fifo_read_cmd(const Command *cmd)
     return -1;
 }
 
+/**
+ * exc_word_count_cmd – 执行单词计数命令：# filename.txt
+ * * 策略：
+ * 1. 参数校验：必须是且仅是 1 个参数
+ * 2. 文件类型校验：参数必须以 .txt 结尾
+ * 3. 文件读取：按空白分词逐个统计
+ * 4. 输出：打印单词总数（仅数字）
+ * 5. 错误处理：参数不对、非 .txt、文件打开/读取失败都会报错并返回 -1
+ */
 static int exc_word_count_cmd(const Command *cmd)
 {
-    (void)cmd;
-    fprintf(stderr, "TODO: exc_word_count_cmd\n");
-    return -1;
+    FILE *fp;
+    const char *path;
+    char word[MAX_LINE];
+    long long count = 0;
+    size_t len;
+
+    // 规范里 # 是一元操作：# sample.txt
+    // 这里要求正好一个参数，并且是 .txt 文件。
+    if (cmd == NULL || cmd->argc != 1)
+    {
+        fprintf(stderr, "minibash: #: expected exactly one .txt file\n");
+        return -1;
+    }
+
+    path = cmd->argv[0];
+    len = strlen(path);
+    if (len < 4 || strcmp(path + len - 4, ".txt") != 0)
+    {
+        fprintf(stderr, "minibash: #: only .txt files are supported\n");
+        return -1;
+    }
+
+    fp = fopen(path, "r");
+    if (fp == NULL)
+    {
+        perror(path);
+        return -1;
+    }
+
+    // 以空白符分隔读取“单词”。
+    while (fscanf(fp, "%511s", word) == 1)
+        count++;
+
+    if (ferror(fp))
+    {
+        perror(path);
+        fclose(fp);
+        return -1;
+    }
+
+    fclose(fp);
+
+    // 输出该文件的单词数量。
+    printf("%lld\n", count);
+    return 0;
 }
 
 static int exc_txt_cat_cmd(const Command *cmd)
