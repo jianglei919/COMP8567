@@ -776,7 +776,7 @@ static int exc_txt_cat_cmd(const Command *cmd);
 static int exc_txt_app_cmd(const Command *cmd);
 
 // 根据命令节点类型(NodeType)分发到对应的执行函数
-static int exc_dispatch_cmd(const Command *cmd, const char *where)
+static int do_dispatch_cmd(const Command *cmd, const char *where)
 {
     switch (cmd->node_type)
     {
@@ -832,7 +832,7 @@ static int exc_sequence_cmd(CommandLine *cmdline)
     {
         const Command *cmd = &cmdline->cmds[i];
 
-        last_rc = exc_dispatch_cmd(cmd, "sequence");
+        last_rc = do_dispatch_cmd(cmd, "sequence");
         if (last_rc < 0)
             return last_rc;
     }
@@ -871,7 +871,7 @@ static int exc_conditional_cmd(CommandLine *cmdline)
     }
 
     /* Execute first command unconditionally. */
-    last_rc = exc_dispatch_cmd(&cmdline->cmds[0], "conditional");
+    last_rc = do_dispatch_cmd(&cmdline->cmds[0], "conditional");
     if (last_rc < 0)
         return last_rc;
 
@@ -890,7 +890,7 @@ static int exc_conditional_cmd(CommandLine *cmdline)
         if (!should_run)
             continue;
 
-        last_rc = exc_dispatch_cmd(cmd, "conditional");
+        last_rc = do_dispatch_cmd(cmd, "conditional");
         if (last_rc < 0)
             return last_rc;
     }
@@ -898,14 +898,6 @@ static int exc_conditional_cmd(CommandLine *cmdline)
     return last_rc;
 }
 
-/*
- * exc_pipe_cmd – 执行管道：cmd0 | cmd1 | ... | cmdN-1
- * 策略：
- * 1. 预先创建 N-1 个管道（pipes[i] 连接 cmd[i] 的标准输出 → cmd[i+1] 的标准输入）。
- * 2. 在关闭父进程中的任何内容之前，先创建所有 N 个子进程，以避免在下一个子进程继承之前意外关闭写入结束符。
- * 3. 在所有子进程创建完成后，关闭父进程中的所有管道文件描述符。
- * 4. 等待所有子进程完成；返回最后一个子进程的退出状态。
- */
 /*
  * run_pipe – 统一处理正向管道(|)和反向管道(~)
  *
@@ -1055,6 +1047,14 @@ static int run_pipe(CommandLine *cmdline, OperatorType expected_op, const char *
     return last_status;
 }
 
+/*
+ * exc_pipe_cmd – 执行管道：cmd0 | cmd1 | ... | cmdN-1
+ * 策略：
+ * 1. 预先创建 N-1 个管道（pipes[i] 连接 cmd[i] 的标准输出 → cmd[i+1] 的标准输入）。
+ * 2. 在关闭父进程中的任何内容之前，先创建所有 N 个子进程，以避免在下一个子进程继承之前意外关闭写入结束符。
+ * 3. 在所有子进程创建完成后，关闭父进程中的所有管道文件描述符。
+ * 4. 等待所有子进程完成；返回最后一个子进程的退出状态。
+ */
 static int exc_pipe_cmd(CommandLine *cmdline)
 {
     // 正向管道：cmd0 | cmd1 | ... | cmdN-1
@@ -1114,7 +1114,7 @@ static int exc_parsed(CommandLine *cmdline)
 
     // 单命令直接根据 node_type 分发
     if (cmdline->cmd_count == 1)
-        return exc_dispatch_cmd(&cmdline->cmds[0], "single");
+        return do_dispatch_cmd(&cmdline->cmds[0], "single");
 
     // 多命令需要根据连接符类型分发
     for (i = 0; i < cmdline->op_count; i++)
