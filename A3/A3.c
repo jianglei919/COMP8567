@@ -906,248 +906,148 @@ static int exc_conditional_cmd(CommandLine *cmdline)
  * 3. 在所有子进程创建完成后，关闭父进程中的所有管道文件描述符。
  * 4. 等待所有子进程完成；返回最后一个子进程的退出状态。
  */
-static int exc_pipe_cmd(CommandLine *cmdline)
+/*
+ * run_pipe – 统一处理正向管道(|)和反向管道(~)
+ *
+ * 参数说明：
+ * - expected_op: 期望的连接符类型（OP_PIPE 或 OP_REVERSE_PIPE）
+ * - where:       用于报错信息，标识调用方
+ * - reverse:     false=按 cmd0->cmdN-1 执行；true=按 cmdN-1->cmd0 执行
+ *
+ * 整体策略：
+ * 1. 预创建 N-1 个 pipe。
+ * 2. fork N 个子进程，每个子进程按 stage(i) 接好 stdin/stdout。
+ * 3. 子进程关闭所有原始 pipe fd，避免泄漏和 EOF 卡住。
+ * 4. 子进程再处理该命令自己的 < / > / >> 重定向（优先级覆盖管道接线）。
+ * 5. 父进程关闭全部 pipe fd，并 wait 所有子进程。
+ * 6. 返回最后一个 stage 的退出码。
+ */
+static int run_pipe(CommandLine *cmdline, OperatorType expected_op, const char *where, bool reverse)
 {
     int i, j;
-    int cmd_count;              // 实际参与管道的命令数量
-    int pipes[MAX_CMDS - 1][2]; // 最多需要 MAX_CMDS-1 个管道；每个管道有 [0]=读端, [1]=写端
-    pid_t pids[MAX_CMDS];       // 记录每个子进程的 pid，后面父进程要 waitpid()
-    int last_status = 0;        // 最后返回整个 pipeline 中“最后一个命令”的退出状态
+    int cmd_count;
+    int pipes[MAX_CMDS - 1][2];
+    pid_t pids[MAX_CMDS];
+    int last_status = 0;
 
-    // 基本合法性检查：
-    // 1. cmdline 不能为空
-    // 2. 管道命令至少要有两个命令段，比如 ls | wc
     if (cmdline == NULL || cmdline->cmd_count < 2)
         return -1;
 
-    cmd_count = cmdline->cmd_count; // 实际命令段数，例如 "ls | grep x | wc" 就是 3 段命令
+    cmd_count = cmdline->cmd_count;
 
-    // 校验所有操作符都必须是 OP_PIPE
-    // 因为这个函数专门处理 pipeline，如果里面混进 &&、||、; 等操作符，逻辑就不对了
     for (i = 0; i < cmdline->op_count; i++)
     {
-        if (cmdline->ops[i] != OP_PIPE)
+        if (cmdline->ops[i] != expected_op)
         {
-            fprintf(stderr, "minibash: exc_pipe_cmd: unexpected non-pipe operator\n");
+            fprintf(stderr, "minibash: %s: unexpected operator\n", where);
             return -1;
         }
     }
 
-    /* Create all pipes before any fork. */
-    // 在 fork 之前，先一次性把所有管道都创建好
-    //
-    // 为什么要先全创建？
-    // 因为后面 fork 出来的每个子进程都要继承这些 fd（文件描述符），
-    // 这样每个子进程才能根据自己在 pipeline 中的位置，
-    // 把某个管道接到自己的 stdin 或 stdout 上。
-    //
-    // n 个命令，只需要 n-1 个管道：
-    // cmd0 | cmd1 | cmd2
-    // 只需要两根管道：
-    // pipe[0] 连接 cmd0 -> cmd1
-    // pipe[1] 连接 cmd1 -> cmd2
     for (i = 0; i < cmd_count - 1; i++)
     {
         if (pipe(pipes[i]) < 0)
         {
-            // 只要有一个 pipe 创建失败，就报错
             perror("pipe");
-
-            // 清理之前已经成功创建的管道，避免 fd 泄漏
             for (j = 0; j < i; j++)
             {
-                close(pipes[j][0]); // 关闭第 j 根管道的读端
-                close(pipes[j][1]); // 关闭第 j 根管道的写端
+                close(pipes[j][0]);
+                close(pipes[j][1]);
             }
             return -1;
         }
     }
 
-    /* Fork every command in the pipeline. */
-    // 现在开始为 pipeline 中的每一个命令 fork 一个子进程
-    // 每个子进程负责执行一段命令
-    //
-    // 例如：
-    //   ls | grep txt | wc -l
-    // 会 fork 3 个子进程：
-    //   child0 执行 ls
-    //   child1 执行 grep txt
-    //   child2 执行 wc -l
+    // 这里的 i 表示“执行链中的 stage 序号”，不是原始 cmd 下标。
+    // reverse=false: cmd_idx=i
+    // reverse=true : cmd_idx=cmd_count-1-i
     for (i = 0; i < cmd_count; i++)
     {
-        // 取出当前这一段命令
-        const Command *cmd = &cmdline->cmds[i];
-
-        // 为当前命令 fork 一个子进程
+        int cmd_idx = reverse ? (cmd_count - 1 - i) : i;
+        const Command *cmd = &cmdline->cmds[cmd_idx];
         pid_t pid = fork();
 
         if (pid < 0)
         {
-            // fork 失败
             perror("fork");
-
-            /* Close remaining pipes and wait for already-forked children. */
-            // 这里说明前面可能已经成功 fork 出一些子进程了
-            // 为了避免资源泄漏或留下孤儿逻辑，先把父进程持有的所有管道关掉
             for (j = 0; j < cmd_count - 1; j++)
             {
                 close(pipes[j][0]);
                 close(pipes[j][1]);
             }
-
-            // 再等待前面已经成功创建的子进程结束
             for (j = 0; j < i; j++)
             {
                 int s;
                 waitpid(pids[j], &s, 0);
             }
-
             return -1;
         }
 
         if (pid == 0)
         {
-            /* ---- Child ---- */
-            // 进入这里说明当前是子进程
-            // 这个子进程将来会执行 cmd->argv[0] 对应的命令
-
-            /* Wire up the pipe ends for this stage. */
-            // 根据当前命令在 pipeline 中的位置，设置它的标准输入/标准输出
-
-            // 如果 i > 0，说明当前不是第一个命令
-            // 那它的输入应该来自“前一根管道”的读端
-            //
-            // 例如：
-            //   cmd0 | cmd1 | cmd2
-            //        ^
-            //      cmd1 的 stdin 来自 pipes[0][0]
+            // stage i 的输入来自上一根管道读端，输出去下一根管道写端。
+            // 不论正向/反向，这个接线规则都保持一致；
+            // 差异只在于 cmd_idx 映射到哪个命令。
             if (i > 0)
-                dup2(pipes[i - 1][0], STDIN_FILENO); /* read from prev pipe */
-
-            // 如果 i < n - 1，说明当前不是最后一个命令
-            // 那它的输出应该写入“当前这根管道”的写端
-            //
-            // 例如：
-            //   cmd0 | cmd1 | cmd2
-            //   ^
-            // cmd0 的 stdout 应该连到 pipes[0][1]
+                dup2(pipes[i - 1][0], STDIN_FILENO);
             if (i < cmd_count - 1)
-                dup2(pipes[i][1], STDOUT_FILENO); /* write to next pipe  */
+                dup2(pipes[i][1], STDOUT_FILENO);
 
-            /* Close every raw pipe fd – child uses dup'd stdin/stdout. */
-            // dup2 之后，标准输入/输出已经指向了正确的位置
-            // 原始的 pipes[j][0] / pipes[j][1] 这些 fd 对当前子进程来说就不再需要了
-            //
-            // 必须关掉！
-            // 否则会有两个问题：
-            // 1. fd 泄漏
-            // 2. 管道写端可能一直没真正关闭，导致读端收不到 EOF
+            // 关闭子进程中所有原始管道 fd：
+            // 否则可能导致写端未真正关闭，读端收不到 EOF。
             for (j = 0; j < cmd_count - 1; j++)
             {
                 close(pipes[j][0]);
                 close(pipes[j][1]);
             }
 
-            /* Per-command file redirections (override pipe wiring if present). */
-            // 下面处理“单个命令自己的文件重定向”
-            //
-            // 重点：
-            // 管道接线是先做的，但如果命令自己还有 < 或 > 重定向，
-            // 那文件重定向优先级更高，会覆盖前面管道的 stdin / stdout 设置。
-            //
-            // 例如：
-            //   cat < in.txt | grep x
-            // 第一个命令的 stdin 最终来自 in.txt，而不是终端
-            //
-            // 再比如：
-            //   ls | grep x > out.txt
-            // 最后一个命令的 stdout 最终去 out.txt，而不是终端
-
+            // 文件重定向优先级高于管道接线：
+            // 例如 cmd < in.txt | ...，该 cmd 的 stdin 最终来自文件。
             if (cmd->redirect_in)
             {
-                // 处理输入重定向 <
-                // 以只读方式打开输入文件
                 int fd = open(cmd->input_file, O_RDONLY);
                 if (fd < 0)
                 {
                     perror(cmd->input_file);
                     exit(1);
                 }
-
-                // 把打开的文件 fd 复制到标准输入 0 上
-                // 之后这个子进程读 stdin，就等价于读这个文件
                 dup2(fd, STDIN_FILENO);
-
-                // 原始 fd 不再需要，关闭
                 close(fd);
             }
 
             if (cmd->redirect_out)
             {
-                // 处理输出重定向 > 或 >>
-                //
-                // O_WRONLY: 只写
-                // O_CREAT : 文件不存在就创建
-                // 如果 append_out 为真，用追加模式 O_APPEND
-                // 否则用截断模式 O_TRUNC（覆盖写）
                 int flags = O_WRONLY | O_CREAT | (cmd->append_out ? O_APPEND : O_TRUNC);
-
-                // 0644:
-                // 用户可读写，组和其他用户只读
                 int fd = open(cmd->output_file, flags, 0644);
                 if (fd < 0)
                 {
                     perror(cmd->output_file);
                     exit(1);
                 }
-
-                // 把打开的文件 fd 复制到标准输出 1 上
-                // 之后这个子进程写 stdout，就等价于写这个文件
                 dup2(fd, STDOUT_FILENO);
-
-                // 原始 fd 不再需要，关闭
                 close(fd);
             }
 
-            // 到这里，子进程的 stdin / stdout 都已经接好了：
-            // - 可能接管道
-            // - 可能接文件
-            // 接下来真正执行命令
             execvp(cmd->argv[0], cmd->argv);
-
-            // 只有 execvp 失败才会执行到这里
-            // 如果 execvp 成功，当前子进程映像会被新程序替换，不会返回
             fprintf(stderr, "minibash: %s: %s\n", cmd->argv[0], strerror(errno));
             exit(123);
         }
 
-        // 进入这里说明当前还是父进程
-        // 记录这个子进程 pid，后面统一 waitpid
         pids[i] = pid;
     }
 
-    /* Parent: close all pipe ends so children get EOF correctly. */
-    // 所有子进程都 fork 完之后，父进程自己不再需要这些管道 fd 了
-    // 所以父进程必须把所有管道端都关掉
-    //
-    // 为什么必须关？
-    // 因为如果父进程还持有某个写端，那么对应读端可能一直感知不到 EOF，
-    // 子进程里的读命令就可能卡住，比如 wc 一直等输入结束
+    // 父进程不参与读写，必须关闭全部 pipe fd，避免子进程读端阻塞等 EOF。
     for (i = 0; i < cmd_count - 1; i++)
     {
         close(pipes[i][0]);
         close(pipes[i][1]);
     }
 
-    /* Wait for all children; keep exit status of the last stage. */
-    // 父进程等待 pipeline 中所有子进程结束，同时，把“最后一个命令”的退出状态保存下来，作为整个管道命令的返回值
-    // 这和很多 shell 的行为一致： 一个 pipeline 的最终状态通常看最后一段命令的退出码
+    // 等待所有 stage；按当前实现返回“最后一个 stage(i=cmd_count-1)”的退出码。
     for (i = 0; i < cmd_count; i++)
     {
         int status;
         waitpid(pids[i], &status, 0);
-
-        // 只记录最后一个子进程（即 pipeline 最后一段命令）的退出状态
         if (i == cmd_count - 1)
             last_status = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
     }
@@ -1155,11 +1055,17 @@ static int exc_pipe_cmd(CommandLine *cmdline)
     return last_status;
 }
 
+static int exc_pipe_cmd(CommandLine *cmdline)
+{
+    // 正向管道：cmd0 | cmd1 | ... | cmdN-1
+    return run_pipe(cmdline, OP_PIPE, "exc_pipe_cmd", false);
+}
+
 static int exc_reverse_pipe_cmd(CommandLine *cmdline)
 {
-    (void)cmdline;
-    fprintf(stderr, "TODO: exc_reverse_pipe_cmd\n");
-    return -1;
+    // 反向管道：cmd0 ~ cmd1 ~ ... ~ cmdN-1
+    // 按右到左执行，即 cmdN-1 先产出，最终流向 cmd0。
+    return run_pipe(cmdline, OP_REVERSE_PIPE, "exc_reverse_pipe_cmd", true);
 }
 
 static int exc_fifo_write_cmd(const Command *cmd)
