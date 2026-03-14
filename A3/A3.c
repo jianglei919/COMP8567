@@ -1140,11 +1140,77 @@ static int exc_word_count_cmd(const Command *cmd)
     return 0;
 }
 
+/**
+ * exc_txt_cat_cmd – 执行文本连接命令：+ file1.txt file2.txt ...
+ * 策略：
+ * 1. 参数校验：必须至少有 1 个参数
+ * 2. 文件类型校验：每个参数必须以 .txt 结尾
+ * 3. 文件读取：按用户输入顺序依次读取每个文本文件内容
+ * 4. 输出：将所有文本文件内容连接输出到标准输出
+ * 5. 错误处理：参数不对、非 .txt、文件打开/读取失败都会报错并返回 -1
+ */
 static int exc_txt_cat_cmd(const Command *cmd)
 {
-    (void)cmd;
-    fprintf(stderr, "TODO: exc_txt_cat_cmd\n");
-    return -1;
+    int i;
+
+    if (cmd == NULL || cmd->argc <= 0)
+    {
+        fprintf(stderr, "minibash: +: expected at least one .txt file\n");
+        return -1;
+    }
+
+    // 按用户输入顺序依次读取并输出每个文本文件内容。
+    for (i = 0; i < cmd->argc; i++)
+    {
+        const char *path = cmd->argv[i];
+        size_t len = strlen(path);
+        FILE *fp;
+        char buf[4096];
+
+        if (len < 4 || strcmp(path + len - 4, ".txt") != 0)
+        {
+            fprintf(stderr, "minibash: +: only .txt files are supported (%s)\n", path);
+            return -1;
+        }
+
+        fp = fopen(path, "r");
+        if (fp == NULL)
+        {
+            perror(path);
+            return -1;
+        }
+
+        while (1)
+        {
+            size_t n = fread(buf, 1, sizeof(buf), fp);
+
+            if (n > 0)
+            {
+                size_t w = fwrite(buf, 1, n, stdout);
+                if (w != n)
+                {
+                    perror("stdout");
+                    fclose(fp);
+                    return -1;
+                }
+            }
+
+            if (n < sizeof(buf))
+            {
+                if (ferror(fp))
+                {
+                    perror(path);
+                    fclose(fp);
+                    return -1;
+                }
+                break;
+            }
+        }
+
+        fclose(fp);
+    }
+
+    return 0;
 }
 
 static int exc_txt_app_cmd(const Command *cmd)
