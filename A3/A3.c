@@ -297,6 +297,106 @@ static int append_command_arg(Command *cmd, const char *text)
     return 0;
 }
 
+// 校验路径是否是 .txt 文件
+static bool is_txt_file_path(const char *path)
+{
+    size_t len;
+
+    if (path == NULL)
+        return false;
+
+    len = strlen(path);
+    return len >= 4 && strcmp(path + len - 4, ".txt") == 0;
+}
+
+// 读取整个文件到内存缓冲区（由调用方 free）
+static int read_file_all(const char *path, char **out_buf, size_t *out_len)
+{
+    FILE *fp;
+    char chunk[4096];
+    char *buf = NULL;
+    size_t len = 0;
+    size_t cap = 0;
+
+    if (path == NULL || out_buf == NULL || out_len == NULL)
+        return -1;
+
+    fp = fopen(path, "r");
+    if (fp == NULL)
+    {
+        perror(path);
+        return -1;
+    }
+
+    while (1)
+    {
+        size_t n = fread(chunk, 1, sizeof(chunk), fp);
+
+        if (n > 0)
+        {
+            if (len + n > cap)
+            {
+                size_t new_cap = (cap == 0) ? 4096 : cap;
+                char *tmp;
+                while (new_cap < len + n)
+                    new_cap *= 2;
+
+                tmp = realloc(buf, new_cap);
+                if (tmp == NULL)
+                {
+                    perror("realloc");
+                    fclose(fp);
+                    free(buf);
+                    return -1;
+                }
+                buf = tmp;
+                cap = new_cap;
+            }
+
+            memcpy(buf + len, chunk, n);
+            len += n;
+        }
+
+        if (n < sizeof(chunk))
+        {
+            if (ferror(fp))
+            {
+                perror(path);
+                fclose(fp);
+                free(buf);
+                return -1;
+            }
+            break;
+        }
+    }
+
+    fclose(fp);
+    *out_buf = buf;
+    *out_len = len;
+    return 0;
+}
+
+// 追加内存缓冲区到目标文件末尾
+static int append_buffer_to_file(const char *path, const char *buf, size_t len)
+{
+    FILE *fp = fopen(path, "a");
+    if (fp == NULL)
+    {
+        perror(path);
+        return -1;
+    }
+
+    if (len > 0 && fwrite(buf, 1, len, fp) != len)
+    {
+        perror(path);
+        fclose(fp);
+        return -1;
+    }
+
+    fclose(fp);
+    return 0;
+}
+
 // 解析命令行字符串，构建 CommandLine 结构
 int lex(const char *line, Token *tokens, int max_tokens)
 {
@@ -1061,9 +1161,9 @@ static int exc_pipe_cmd(CommandLine *cmdline)
     return run_pipe(cmdline, OP_PIPE, "exc_pipe_cmd", false);
 }
 
+// 反向管道：cmd0 ~ cmd1 ~ ... ~ cmdN-1
 static int exc_reverse_pipe_cmd(CommandLine *cmdline)
 {
-    // 反向管道：cmd0 ~ cmd1 ~ ... ~ cmdN-1
     // 按右到左执行，即 cmdN-1 先产出，最终流向 cmd0。
     return run_pipe(cmdline, OP_REVERSE_PIPE, "exc_reverse_pipe_cmd", true);
 }
@@ -1097,7 +1197,6 @@ static int exc_word_count_cmd(const Command *cmd)
     const char *path;
     char word[MAX_LINE];
     long long count = 0;
-    size_t len;
 
     // 规范里 # 是一元操作：# sample.txt
     // 这里要求正好一个参数，并且是 .txt 文件。
@@ -1108,8 +1207,7 @@ static int exc_word_count_cmd(const Command *cmd)
     }
 
     path = cmd->argv[0];
-    len = strlen(path);
-    if (len < 4 || strcmp(path + len - 4, ".txt") != 0)
+    if (!is_txt_file_path(path))
     {
         fprintf(stderr, "minibash: #: only .txt files are supported\n");
         return -1;
@@ -1163,61 +1261,104 @@ static int exc_txt_cat_cmd(const Command *cmd)
     for (i = 0; i < cmd->argc; i++)
     {
         const char *path = cmd->argv[i];
-        size_t len = strlen(path);
-        FILE *fp;
-        char buf[4096];
+        char *buf = NULL;
+        size_t len = 0;
 
-        if (len < 4 || strcmp(path + len - 4, ".txt") != 0)
+        if (!is_txt_file_path(path))
         {
             fprintf(stderr, "minibash: +: only .txt files are supported (%s)\n", path);
             return -1;
         }
 
-        fp = fopen(path, "r");
-        if (fp == NULL)
+        if (read_file_all(path, &buf, &len) < 0)
+            return -1;
+
+        if (len > 0 && fwrite(buf, 1, len, stdout) != len)
         {
-            perror(path);
+            perror("stdout");
+            free(buf);
             return -1;
         }
 
-        while (1)
-        {
-            size_t n = fread(buf, 1, sizeof(buf), fp);
-
-            if (n > 0)
-            {
-                size_t w = fwrite(buf, 1, n, stdout);
-                if (w != n)
-                {
-                    perror("stdout");
-                    fclose(fp);
-                    return -1;
-                }
-            }
-
-            if (n < sizeof(buf))
-            {
-                if (ferror(fp))
-                {
-                    perror(path);
-                    fclose(fp);
-                    return -1;
-                }
-                break;
-            }
-        }
-
-        fclose(fp);
+        free(buf);
     }
 
     return 0;
 }
 
+/**
+ * exc_txt_app_cmd – 执行文本追加命令：file1.txt ++ file2.txt
+ * 策略：
+ * 1. 参数校验：必须且仅有 2 个参数
+ * 2. 文件类型校验：每个参数必须以 .txt 结尾
+ * 3. 先读取 file1 原始内容到内存 buf1
+ * 4. 再读取 file2 原始内容到内存 buf2
+ * 5. 把 buf2 追加到 file1
+ * 6. 把 buf1 追加到 file2
+ * 7. 文件写入：将 file2.txt 的原始内容追加到 file1.txt，将 file1.txt 的原始内容追加到 file2.txt
+ * 8. 错误处理：参数不对、非 .txt、文件打开/读取/写入失败都会报错并返回 -1
+ */
 static int exc_txt_app_cmd(const Command *cmd)
 {
-    (void)cmd;
-    fprintf(stderr, "TODO: exc_txt_app_cmd\n");
-    return -1;
+    const char *path1;
+    const char *path2;
+    char *buf1 = NULL;
+    char *buf2 = NULL;
+    size_t buf1_len = 0;
+    size_t buf2_len = 0;
+
+    // 规范里 ++ 是二元操作：file1.txt ++ file2.txt
+    // 需要把 file2 原始内容追加到 file1，同时把 file1 原始内容追加到 file2。
+    if (cmd == NULL || cmd->argc != 2)
+    {
+        fprintf(stderr, "minibash: ++: expected exactly two .txt files\n");
+        return -1;
+    }
+
+    path1 = cmd->argv[0];
+    path2 = cmd->argv[1];
+
+    if (!is_txt_file_path(path1) || !is_txt_file_path(path2))
+    {
+        fprintf(stderr, "minibash: ++: only .txt files are supported\n");
+        return -1;
+    }
+
+    if (strcmp(path1, path2) == 0)
+    {
+        fprintf(stderr, "minibash: ++: requires two different files\n");
+        return -1;
+    }
+
+    // 先读取两个文件的原始快照，避免互相覆盖污染。
+    if (read_file_all(path1, &buf1, &buf1_len) < 0)
+        return -1;
+
+    if (read_file_all(path2, &buf2, &buf2_len) < 0)
+    {
+        free(buf1);
+        return -1;
+    }
+
+    // 用 file2 的原始快照追加到 file1。
+    if (append_buffer_to_file(path1, buf2, buf2_len) < 0)
+    {
+        free(buf1);
+        free(buf2);
+        return -1;
+    }
+
+    // 用 file1 的原始快照追加到 file2。
+    if (append_buffer_to_file(path2, buf1, buf1_len) < 0)
+    {
+        free(buf1);
+        free(buf2);
+        return -1;
+    }
+
+    free(buf1);
+    free(buf2);
+    return 0;
 }
 
 // 根据解析结果中的命令类型调用不同的执行函数
