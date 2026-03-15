@@ -18,6 +18,7 @@ A2/ptree26w
 A2/a2sampletree
 A3/A3
 A3/*.txt
+A3/*.sh
 A3/A32
 A3/A32.c
 A3/fork1
@@ -30,3 +31,4 @@ Lab/lab5
 Lab/lab6
 Lab/lab7
 Pipes/out/*
+*.log

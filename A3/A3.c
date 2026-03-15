@@ -27,8 +27,8 @@
 pid_t bg_pids[MAX_BG];
 int bg_count;
 
-pid_t last_bg_pid;
-pid_t last_stopped_pid;
+pid_t last_bg_pid = -1;
+pid_t last_stopped_pid = -1;
 
 // 命令之间的连接类型
 typedef enum OperatorType
@@ -250,6 +250,49 @@ static void bg_add(pid_t pid)
     {
         bg_pids[bg_count++] = pid;
         last_bg_pid = pid;
+    }
+}
+
+/* Remove an entry from bg_pids by index. */
+static void bg_remove_at(int idx)
+{
+    int i;
+
+    if (idx < 0 || idx >= bg_count)
+        return;
+
+    for (i = idx; i < bg_count - 1; i++)
+        bg_pids[i] = bg_pids[i + 1];
+
+    bg_count--;
+}
+
+/* Reap finished background children and keep bg_count accurate. */
+static void bg_reap(void)
+{
+    int i = 0;
+
+    while (i < bg_count)
+    {
+        pid_t pid = bg_pids[i];
+        int status;
+        pid_t rc = waitpid(pid, &status, WNOHANG);
+
+        if (rc == 0)
+        {
+            i++;
+            continue;
+        }
+
+        if (rc < 0 && errno != ECHILD)
+            perror("waitpid");
+
+        if (last_bg_pid == pid)
+            last_bg_pid = -1;
+        if (last_stopped_pid == pid)
+            last_stopped_pid = -1;
+
+        bg_remove_at(i);
     }
 }
 
@@ -1150,7 +1193,7 @@ static int exc_builtin_cmd(const Command *cmd)
         if (last_bg_pid == -1)
             fprintf(stderr, "minibash: no background process to stop.\n");
         else if (kill(last_bg_pid, SIGSTOP) < 0)
-            perror("pstop");
+            fprintf(stderr, "minibash: pstop: %s\n", strerror(errno));
         else
         {
             last_stopped_pid = last_bg_pid;
@@ -1164,7 +1207,7 @@ static int exc_builtin_cmd(const Command *cmd)
         if (last_stopped_pid == -1)
             fprintf(stderr, "minibash: no stopped process to continue.\n");
         else if (kill(last_stopped_pid, SIGCONT) < 0)
-            perror("cont");
+            fprintf(stderr, "minibash: cont: %s\n", strerror(errno));
         else
         {
             int s;
@@ -1187,7 +1230,7 @@ static int exc_builtin_cmd(const Command *cmd)
         for (i = 0; i < bg_count; i++)
         {
             if (kill(bg_pids[i], SIGKILL) < 0)
-                perror("killbp");
+                fprintf(stderr, "minibash: killbp: %s\n", strerror(errno));
             else
                 printf("[killbp] killed pid %d\n", (int)bg_pids[i]);
         }
@@ -1235,7 +1278,7 @@ static int exc_sequence_cmd(CommandLine *cmdline)
     {
         if (cmdline->ops[i] != OP_SEQ)
         {
-            fprintf(stderr, "minibash: exc_sequence_cmd only supports ';' operators\n");
+            fprintf(stderr, "minibash: sequence only supports ';' operators\n");
             return -1;
         }
     }
@@ -1277,7 +1320,7 @@ static int exc_conditional_cmd(CommandLine *cmdline)
     {
         if (cmdline->ops[i] != OP_AND && cmdline->ops[i] != OP_OR)
         {
-            fprintf(stderr, "minibash: exc_conditional_cmd only supports '&&' and '||' operators\n");
+            fprintf(stderr, "minibash: conditional only supports '&&' and '||' operators\n");
             return -1;
         }
     }
@@ -1321,14 +1364,14 @@ static int exc_conditional_cmd(CommandLine *cmdline)
 static int exc_pipe_cmd(CommandLine *cmdline)
 {
     // 正向管道：cmd0 | cmd1 | ... | cmdN-1
-    return run_pipe(cmdline, OP_PIPE, "exc_pipe_cmd", false);
+    return run_pipe(cmdline, OP_PIPE, "pipe", false);
 }
 
 // 反向管道：cmd0 ~ cmd1 ~ ... ~ cmdN-1
 static int exc_reverse_pipe_cmd(CommandLine *cmdline)
 {
     // 按右到左执行，即 cmdN-1 先产出，最终流向 cmd0。
-    return run_pipe(cmdline, OP_REVERSE_PIPE, "exc_reverse_pipe_cmd", true);
+    return run_pipe(cmdline, OP_REVERSE_PIPE, "reverse pipe", true);
 }
 
 /**
@@ -1672,7 +1715,7 @@ int main(void)
 
     while (1)
     {
-        // bg_reap(); /* reap any finished bg children  */
+        bg_reap(); /* reap any finished bg children */
         printf("minibash$ ");
         fflush(stdout);
 
