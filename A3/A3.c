@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include <ctype.h>
 #include <errno.h>
+#include <dirent.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <signal.h>
@@ -1003,6 +1004,101 @@ static int exc_word_count_cmd(const Command *cmd);
 static int exc_txt_cat_cmd(const Command *cmd);
 static int exc_txt_app_cmd(const Command *cmd);
 
+// 给定 pid，判断是否和当前进程运行的是同一个可执行文件
+static bool is_same_executable_as_self(pid_t pid)
+{
+    char self_exe[PATH_MAX];
+    char other_exe[PATH_MAX];
+    char proc_link[64];
+    ssize_t n1, n2;
+
+    n1 = readlink("/proc/self/exe", self_exe, sizeof(self_exe) - 1);
+    if (n1 < 0)
+        return false;
+    self_exe[n1] = '\0';
+
+    if (snprintf(proc_link, sizeof(proc_link), "/proc/%d/exe", (int)pid) >= (int)sizeof(proc_link))
+        return false;
+
+    n2 = readlink(proc_link, other_exe, sizeof(other_exe) - 1);
+    if (n2 < 0)
+        return false;
+    other_exe[n2] = '\0';
+
+    return strcmp(self_exe, other_exe) == 0;
+}
+
+// 判断目标 pid 是否运行在“不同终端”上
+static bool is_on_different_terminal_from_self(pid_t pid)
+{
+    char self_tty[PATH_MAX];
+    char other_tty[PATH_MAX];
+    char fd0_link[64];
+    ssize_t n;
+
+    // 当前进程终端（例如 /dev/pts/3）
+    if (ttyname_r(STDIN_FILENO, self_tty, sizeof(self_tty)) != 0)
+        return false;
+
+    if (snprintf(fd0_link, sizeof(fd0_link), "/proc/%d/fd/0", (int)pid) >= (int)sizeof(fd0_link))
+        return false;
+
+    // 读取目标进程 stdin 指向的终端设备
+    n = readlink(fd0_link, other_tty, sizeof(other_tty) - 1);
+    if (n < 0)
+        return false;
+    other_tty[n] = '\0';
+
+    return strcmp(self_tty, other_tty) != 0;
+}
+
+// 向其它 minibash 实例发送信号（不包含当前进程），返回成功发送的数量
+static int signal_other_minibash_instances(int sig)
+{
+    DIR *dir;
+    struct dirent *ent;
+    pid_t self = getpid();
+    int count = 0;
+
+    dir = opendir("/proc");
+    if (dir == NULL)
+    {
+        perror("/proc");
+        return -1;
+    }
+
+    while ((ent = readdir(dir)) != NULL)
+    {
+        char *endptr;
+        long lpid;
+        pid_t pid;
+
+        if (!isdigit((unsigned char)ent->d_name[0]))
+            continue;
+
+        lpid = strtol(ent->d_name, &endptr, 10);
+        if (*endptr != '\0' || lpid <= 0)
+            continue;
+
+        pid = (pid_t)lpid;
+        if (pid == self)
+            continue;
+
+        if (!is_same_executable_as_self(pid))
+            continue;
+
+        // killallmb 作用于“不同终端”上的 minibash。
+        if (!is_on_different_terminal_from_self(pid))
+            continue;
+
+        if (kill(pid, sig) == 0)
+            count++;
+    }
+
+    closedir(dir);
+    return count;
+}
+
 // 根据命令节点类型(NodeType)分发到对应的执行函数
 static int do_dispatch_cmd(const Command *cmd, const char *where)
 {
@@ -1035,12 +1131,17 @@ static int exc_builtin_cmd(const Command *cmd)
     if (strcmp(name, "killmb") == 0)
     {
         printf("minibash: exiting.\n");
+        // 结束当前 minibash 终端会话。
         exit(0);
     }
 
     if (strcmp(name, "killallmb") == 0)
     {
-        fprintf(stderr, "TODO: killallmb\n");
+        int n = signal_other_minibash_instances(SIGTERM);
+        if (n < 0)
+            return -1;
+
+        printf("[killallmb] signaled %d minibash instance(s).\n", n);
         return 0;
     }
 
