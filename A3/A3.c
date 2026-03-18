@@ -501,7 +501,7 @@ static int ensure_common_fifo(char *fifo_path, size_t fifo_path_sz)
 }
 
 // 解析命令行字符串，构建 CommandLine 结构
-int lex(const char *line, Token *tokens, int max_tokens)
+int do_lex(const char *line, Token *tokens, int max_tokens)
 {
     const char *p;
     int count = 0;
@@ -1750,7 +1750,7 @@ int main(void)
         CommandLine parsed;
 
         // 词法分析和语法分析
-        int ntok = lex(line, tokens, MAX_TOKENS);
+        int ntok = do_lex(line, tokens, MAX_TOKENS);
 
         if (ntok < 0)
         {
