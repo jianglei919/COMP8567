@@ -31,4 +31,11 @@ labs/lab5
 labs/lab6
 labs/lab7
 pipes/out/*
+fileio/out/*
+pointer/out/*
+process/out/*
+shellp/out/*
+signal/out/*
+threads/out/*
+sockets/out/*
 *.log
