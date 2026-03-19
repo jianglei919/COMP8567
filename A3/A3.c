@@ -253,18 +253,38 @@ static void bg_add(pid_t pid)
     }
 }
 
+/* Check whether a pid is still tracked in background list. */
+static bool bg_has_pid(pid_t pid)
+{
+    int i;
+    for (i = 0; i < bg_count; i++)
+    {
+        if (bg_pids[i] == pid)
+            return true;
+    }
+    return false;
+}
+
 /* Remove an entry from bg_pids by index. */
 static void bg_remove_at(int idx)
 {
     int i;
+    pid_t removed;
 
     if (idx < 0 || idx >= bg_count)
         return;
+
+    removed = bg_pids[idx];
 
     for (i = idx; i < bg_count - 1; i++)
         bg_pids[i] = bg_pids[i + 1];
 
     bg_count--;
+
+    if (removed == last_bg_pid)
+        last_bg_pid = (bg_count > 0) ? bg_pids[bg_count - 1] : -1;
+    if (removed == last_stopped_pid)
+        last_stopped_pid = -1;
 }
 
 /* Reap finished background children and keep bg_count accurate. */
@@ -286,11 +306,6 @@ static void bg_reap(void)
 
         if (rc < 0 && errno != ECHILD)
             perror("waitpid");
-
-        if (last_bg_pid == pid)
-            last_bg_pid = -1;
-        if (last_stopped_pid == pid)
-            last_stopped_pid = -1;
 
         bg_remove_at(i);
     }
@@ -1190,7 +1205,7 @@ static int exc_builtin_cmd(const Command *cmd)
 
     if (strcmp(name, "pstop") == 0)
     {
-        if (last_bg_pid == -1)
+        if (last_bg_pid == -1 || !bg_has_pid(last_bg_pid))
             fprintf(stderr, "minibash: no background process to stop.\n");
         else if (kill(last_bg_pid, SIGSTOP) < 0)
             fprintf(stderr, "minibash: pstop: %s\n", strerror(errno));
@@ -1235,6 +1250,8 @@ static int exc_builtin_cmd(const Command *cmd)
                 printf("[killbp] killed pid %d\n", (int)bg_pids[i]);
         }
         bg_count = 0;
+        last_bg_pid = -1;
+        last_stopped_pid = -1;
         return 0;
     }
 
