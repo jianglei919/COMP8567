@@ -30,7 +30,7 @@ int bg_count;
 pid_t last_bg_pid = -1;
 pid_t last_stopped_pid = -1;
 
-// 命令之间的连接类型
+// Connection type between command segments
 typedef enum OperatorType
 {
     OP_PIPE,
@@ -40,19 +40,19 @@ typedef enum OperatorType
     OP_REVERSE_PIPE
 } OperatorType;
 
-// 命令节点的类型
+// Command node type
 typedef enum NodeType
 {
-    NODE_SIMPLE,     // 普通命令
-    NODE_BG,         // 后台命令
-    NODE_FIFO_W,     // FIFO 写端
-    NODE_FIFO_R,     // FIFO 读端
-    NODE_WORD_COUNT, // 统计单词数的特殊命令
-    NODE_TXT_CAT,    // 文本连接命令（+）
-    NODE_TXT_APP     // 文本追加命令（++）
+    NODE_SIMPLE,     // regular command
+    NODE_BG,         // background command
+    NODE_FIFO_W,     // FIFO writer side
+    NODE_FIFO_R,     // FIFO reader side
+    NODE_WORD_COUNT, // special word-count command
+    NODE_TXT_CAT,    // text concatenation command (+)
+    NODE_TXT_APP     // text append command (++)
 } NodeType;
 
-// 词法分析得到的 token 类型
+// Token types produced by lexical analysis
 typedef enum TokType
 {
     TOK_WORD,
@@ -78,60 +78,60 @@ typedef enum TokType
     TOK_EOF
 } TokType;
 
-// 词法分析得到的 token 结构
+// Token structure produced by lexical analysis
 typedef struct Token
 {
-    TokType type;        // token 类型
-    char text[MAX_LINE]; // token 文本内容，最长 MAX_LINE-1 字符 + 结尾 '\0'
+    TokType type;        // token type
+    char text[MAX_LINE]; // token text, up to MAX_LINE-1 chars plus trailing '\0'
 } Token;
 
-// 解析得到的命令结构
+// Parsed command structure
 typedef struct Command
 {
-    char *argv[MAX_ARGC + 1]; // execvp 需要，最后一个必须是 NULL
-    int argc;                 // 参数个数，含命令名，范围 1~4
+    char *argv[MAX_ARGC + 1]; // required by execvp; last entry must be NULL
+    int argc;                 // argument count including command name, range 1-4
 
-    NodeType node_type; // 这个命令的类型，决定了如何执行
+    NodeType node_type; // type of this command, used by executor dispatch
 
-    char raw[1024]; // 这一段原始命令文本，便于调试/报错
+    char raw[1024]; // raw command text for debugging/error reporting
 
-    pid_t pid;        // 这个命令真正运行后对应的进程 id
-    int exit_status;  // 前台执行完成后的退出码
-    int has_executed; // 是否执行过
+    pid_t pid;        // pid of the process running this command
+    int exit_status;  // exit status after foreground execution
+    int has_executed; // whether command has been executed
 
-    int run_in_background; // 是否后台运行（主要给简单命令或最后一段使用）
+    int run_in_background; // whether to run in background (mainly for simple/last segment)
 
-    // 重定向信息
+    // redirection info
     char input_file[512];  // <
-    char output_file[512]; // > 或 >>
-    int redirect_in;       // 是否有输入重定向
-    int redirect_out;      // 是否有输出重定向
-    int append_out;        // 1 表示 >>，0 表示 >
+    char output_file[512]; // > or >>
+    int redirect_in;       // whether input redirection exists
+    int redirect_out;      // whether output redirection exists
+    int append_out;        // 1 means >>, 0 means >
 
 } Command;
 
-// 整条命令行的结构，包含多段命令和连接它们的操作符
+// Command-line structure: multiple commands and connecting operators
 typedef struct CommandLine
 {
-    Command cmds[MAX_CMDS]; // 最多支持 MAX_CMDS 段命令
-    int cmd_count;          // 实际的命令段数，范围 1~MAX_CMDS
+    Command cmds[MAX_CMDS]; // supports up to MAX_CMDS command segments
+    int cmd_count;          // actual command segment count, range 1..MAX_CMDS
 
-    OperatorType ops[MAX_CMDS - 1]; // 连接命令的操作符，数量比命令段数少 1
-    int op_count;                   // 实际的操作符数量，范围 0~MAX_CMDS-1
+    OperatorType ops[MAX_CMDS - 1]; // operators connecting commands, one fewer than command count
+    int op_count;                   // actual operator count, range 0..MAX_CMDS-1
 } CommandLine;
 
-// 命令执行类型
+// Command execution type
 typedef enum ExecType
 {
-    EXEC_SINGLE,       // 单命令，根据 node_type 分发
-    EXEC_SEQUENCE,     // ; 顺序执行命令
-    EXEC_CONDITIONAL,  // && 和 || 条件执行命令
-    EXEC_PIPE,         // | 管道命令
-    EXEC_REVERSE_PIPE, // ~ 反向管道命令
-    EXEC_INVALID       // 不支持的混合操作符组合
+    EXEC_SINGLE,       // single command, dispatched by node_type
+    EXEC_SEQUENCE,     // ; sequential command execution
+    EXEC_CONDITIONAL,  // conditional execution with && and ||
+    EXEC_PIPE,         // pipeline command
+    EXEC_REVERSE_PIPE, // reverse pipeline command
+    EXEC_INVALID       // unsupported mixed-operator combination
 } ExecType;
 
-// 解析错误码
+// Parse error codes
 typedef enum ParseErrorCode
 {
     PARSE_ERR_INVALID_INPUT = -1,
@@ -152,7 +152,7 @@ typedef enum ParseErrorCode
 static const char *BUILTIN_NAMES[] = {
     "killmb", "killallmb", "pstop", "cont", "numbg", "killbp", NULL};
 
-// 移除字符串首尾的空白字符
+// Trim leading and trailing whitespace from string
 static void trim_inplace(char *s)
 {
     if (s == NULL)
@@ -162,22 +162,22 @@ static void trim_inplace(char *s)
     int end = strlen(s) - 1;
     int i, j = 0;
 
-    // 找前面的第一个非空格字符
+    // find first non-space from the left
     while (s[start] != '\0' && isspace((unsigned char)s[start]))
         start++;
 
-    // 如果全是空格
+    // if the string is all spaces
     if (s[start] == '\0')
     {
         s[0] = '\0';
         return;
     }
 
-    // 找后面的第一个非空格字符
+    // find first non-space from the right
     while (end >= 0 && isspace((unsigned char)s[end]))
         end--;
 
-    // 把中间有效内容搬到前面
+    // shift the valid middle segment to the front
     for (i = start; i <= end; i++)
     {
         s[j] = s[i];
@@ -187,7 +187,7 @@ static void trim_inplace(char *s)
     s[j] = '\0';
 }
 
-// 丢弃输入行剩余的内容，直到遇到换行符或 EOF
+// discard the rest of the input line until newline or EOF
 static void discard_rest_of_line(void)
 {
     int ch;
@@ -311,7 +311,7 @@ static void bg_reap(void)
     }
 }
 
-// 检查命令名是否是内置命令
+// Check whether command name is a builtin
 static bool is_builtin(const char *name)
 {
     int i;
@@ -321,7 +321,7 @@ static bool is_builtin(const char *name)
     return false;
 }
 
-// 把一个 token 压入 token 数组，返回 0 成功，负数表示错误
+// Push one token into array: 0 on success, negative on error
 static int push_token(Token *tokens, int max_tokens, int *count, TokType type, const char *text)
 {
     if (*count >= max_tokens - 1)
@@ -342,14 +342,14 @@ static int push_token(Token *tokens, int max_tokens, int *count, TokType type, c
     return 0;
 }
 
-// 判断 token 类型是否是命令连接符（|、||、|||、&&、;、~ 或 EOF）
+// Check whether token type is a command connector (|, ||, |||, &&, ;, ~, or EOF)
 static bool is_command_connector(TokType type)
 {
     return type == TOK_PIPE || type == TOK_DAMP || type == TOK_DPIPE ||
            type == TOK_SEMI || type == TOK_TILDE || type == TOK_EOF;
 }
 
-// 追加一个参数到 Command 结构的 argv 中，返回 0 成功，负数表示错误
+// Append one argument to Command.argv: 0 on success, negative on error
 static int append_command_arg(Command *cmd, const char *text)
 {
     if (cmd->argc >= MAX_ARGC)
@@ -366,7 +366,7 @@ static int append_command_arg(Command *cmd, const char *text)
     return 0;
 }
 
-// 校验路径是否是 .txt 文件
+// Validate whether path is a .txt file
 static bool is_txt_file_path(const char *path)
 {
     size_t len;
@@ -378,7 +378,7 @@ static bool is_txt_file_path(const char *path)
     return len >= 4 && strcmp(path + len - 4, ".txt") == 0;
 }
 
-// 读取整个文件到内存缓冲区（由调用方 free）
+// Read entire file into memory buffer (caller frees)
 static int read_file_all(const char *path, char **out_buf, size_t *out_len)
 {
     FILE *fp;
@@ -401,6 +401,7 @@ static int read_file_all(const char *path, char **out_buf, size_t *out_len)
     {
         size_t n = fread(chunk, 1, sizeof(chunk), fp);
 
+        // n can be 0 on EOF or error; check ferror to distinguish
         if (n > 0)
         {
             if (len + n > cap)
@@ -411,7 +412,7 @@ static int read_file_all(const char *path, char **out_buf, size_t *out_len)
                     new_cap *= 2;
 
                 tmp = realloc(buf, new_cap);
-                if (tmp == NULL)
+                if (tmp == NULL) // realloc failure does not free original buffer, so we can still clean up properly
                 {
                     perror("realloc");
                     fclose(fp);
@@ -422,6 +423,7 @@ static int read_file_all(const char *path, char **out_buf, size_t *out_len)
                 cap = new_cap;
             }
 
+            // append chunk to buf
             memcpy(buf + len, chunk, n);
             len += n;
         }
@@ -445,7 +447,7 @@ static int read_file_all(const char *path, char **out_buf, size_t *out_len)
     return 0;
 }
 
-// 追加内存缓冲区到目标文件末尾
+// Append memory buffer to end of target file
 static int append_buffer_to_file(const char *path, const char *buf, size_t len)
 {
     FILE *fp = fopen(path, "a");
@@ -455,6 +457,9 @@ static int append_buffer_to_file(const char *path, const char *buf, size_t len)
         return -1;
     }
 
+    // if len is 0, we still want to create the file if it does not exist,
+    // but we should not call fwrite with a NULL buffer even if it is valid according to C standard,
+    // because some implementations may not handle it well.
     if (len > 0 && fwrite(buf, 1, len, fp) != len)
     {
         perror(path);
@@ -466,7 +471,7 @@ static int append_buffer_to_file(const char *path, const char *buf, size_t len)
     return 0;
 }
 
-// 构建并确保公共 FIFO 存在，成功时返回 0，并写出 fifo_path。
+// Build and ensure common FIFO exists; return 0 on success and output fifo_path.
 static int ensure_common_fifo(char *fifo_path, size_t fifo_path_sz)
 {
     const char *home;
@@ -515,7 +520,25 @@ static int ensure_common_fifo(char *fifo_path, size_t fifo_path_sz)
     return 0;
 }
 
-// 解析命令行字符串，构建 CommandLine 结构
+/*
+ * do_lex - convert one raw input line into a flat token sequence.
+ *
+ * High-level flow:
+ * 1. Validate pointers and token-buffer capacity.
+ * 2. Scan input left-to-right with cursor p.
+ * 3. Skip whitespace.
+ * 4. Match multi-character operators first (|||, ||, &&, >>, ++)
+ *    so they are not split into shorter tokens.
+ * 5. Match single-character operators and meta symbols
+ *    (|, &, ;, ~, +, #, <, >).
+ * 6. Otherwise parse a word token until whitespace/operator boundary.
+ * 7. Detect word overflow and token-array overflow through helpers.
+ * 8. Append TOK_EOF sentinel and return number of non-EOF tokens.
+ *
+ * Return value:
+ * - >= 0: number of produced tokens (excluding TOK_EOF sentinel).
+ * - < 0 : ParseErrorCode describing the first lexical failure.
+ */
 int do_lex(const char *line, Token *tokens, int max_tokens)
 {
     const char *p;
@@ -657,7 +680,7 @@ int do_lex(const char *line, Token *tokens, int max_tokens)
     return count;
 }
 
-// 解析命令连接符，构建 OperatorType
+// Parse command connector into OperatorType
 int parse_operator(const Token *tokens, int ntok, int *pos, OperatorType *out)
 {
     if (tokens == NULL || pos == NULL || out == NULL || *pos >= ntok)
@@ -690,7 +713,34 @@ int parse_operator(const Token *tokens, int ntok, int *pos, OperatorType *out)
     }
 }
 
-// 解析单个命令，构建 Command 结构
+/*
+ * parse_command - parse exactly one command segment from token stream.
+ *
+ * Inputs:
+ * - tokens/ntok: lexical tokens from do_lex.
+ * - pos        : in/out cursor; starts at first token of this segment and
+ *                advances to connector/EOF or parse error.
+ * - out        : destination Command, fully reset by this function.
+ *
+ * Segment boundary:
+ * - Parsing stops when current token is a command connector
+ *   (|, &&, ||, ;, ~) or TOK_EOF.
+ *
+ * What this function handles:
+ * - Regular argv words.
+ * - Node-type markers (#, |||, +, ++, &).
+ * - Redirections (<, >, >>) with strict "next token must be WORD" validation.
+ *
+ * Special notes:
+ * - '&' marks NODE_BG and ends this segment immediately.
+ * - '|||' is interpreted as reader or writer depending on whether argv
+ *   already has content (argc==0 -> reader, otherwise writer).
+ * - A valid command segment must contain at least one argv word.
+ *
+ * Return value:
+ * - 1  : parsed one valid command segment.
+ * - <0 : ParseErrorCode or validation failure.
+ */
 int parse_command(const Token *tokens, int ntok, int *pos, Command *out)
 {
     if (tokens == NULL || pos == NULL || out == NULL || *pos >= ntok)
@@ -701,6 +751,8 @@ int parse_command(const Token *tokens, int ntok, int *pos, Command *out)
 
     while (*pos < ntok && !is_command_connector(tokens[*pos].type))
     {
+        // we can safely read tokens[*pos] here because the loop condition ensures *pos < ntok
+
         const Token *tok = &tokens[*pos];
 
         switch (tok->type)
@@ -766,7 +818,26 @@ int parse_command(const Token *tokens, int ntok, int *pos, Command *out)
     return out->argc > 0 ? 1 : PARSE_ERR_EXPECTED_COMMAND;
 }
 
-// 解析命令行字符串，构建 CommandLine 结构
+/*
+ * parse_command_line - parse full token stream into CommandLine.
+ *
+ * Build strategy:
+ * 1. Reset output CommandLine.
+ * 2. Repeatedly parse one command segment via parse_command().
+ * 3. After each command (except at EOF), parse exactly one connector
+ *    via parse_operator().
+ * 4. Enforce MAX_CMDS and MAX_CMDS-1 operator limits.
+ * 5. Stop cleanly at TOK_EOF.
+ *
+ * Structural guarantees on success:
+ * - cmd_count > 0
+ * - op_count == cmd_count - 1  (for multi-command input)
+ * - commands/operators are stored in left-to-right user order.
+ *
+ * Return value:
+ * - 0  : fully parsed command line.
+ * - <0 : ParseErrorCode at first structural/semantic failure.
+ */
 int parse_command_line(const Token *tokens, int ntok, CommandLine *out)
 {
     int pos = 0;
@@ -801,7 +872,7 @@ int parse_command_line(const Token *tokens, int ntok, CommandLine *out)
     return out->cmd_count > 0 ? 0 : PARSE_ERR_EXPECTED_COMMAND;
 }
 
-// 释放 Command 中分配的 argv 字符串
+// Free argv strings allocated in Command
 static void free_parsed_command(Command *cmd)
 {
     int i;
@@ -813,7 +884,7 @@ static void free_parsed_command(Command *cmd)
     cmd->argc = 0;
 }
 
-// 释放 CommandLine 中分配的 argv 字符串
+// Free argv strings allocated in CommandLine
 static void free_parsed_command_line(CommandLine *cmdline)
 {
     int i;
@@ -826,7 +897,7 @@ static void free_parsed_command_line(CommandLine *cmdline)
 }
 
 /*
- * run_cmd – the single fork+exec helper used by all executors.
+ * run_cmd - the single fork+exec helper used by all executors.
  *
  * If foreground=true:  parent waits and returns exit status.
  * If foreground=false: parent returns immediately; pid stored in bg list.
@@ -906,20 +977,20 @@ static int run_cmd(const Command *cmd_info, bool foreground, int stdin_fd, int s
 }
 
 /*
- * run_pipe – 统一处理正向管道(|)和反向管道(~)
+ * run_pipe - Handle both forward (|) and reverse (~) pipelines in one helper
  *
- * 参数说明：
- * - expected_op: 期望的连接符类型（OP_PIPE 或 OP_REVERSE_PIPE）
- * - where:       用于报错信息，标识调用方
- * - reverse:     false=按 cmd0->cmdN-1 执行；true=按 cmdN-1->cmd0 执行
+ * Parameters:
+ * - expected_op: expected connector type (OP_PIPE or OP_REVERSE_PIPE)
+ * - where:       used in error messages to identify caller
+ * - reverse:     false: execute cmd0->cmdN-1; true: execute cmdN-1->cmd0
  *
- * 整体策略：
- * 1. 预创建 N-1 个 pipe。
- * 2. fork N 个子进程，每个子进程按 stage(i) 接好 stdin/stdout。
- * 3. 子进程关闭所有原始 pipe fd，避免泄漏和 EOF 卡住。
- * 4. 子进程再处理该命令自己的 < / > / >> 重定向（优先级覆盖管道接线）。
- * 5. 父进程关闭全部 pipe fd，并 wait 所有子进程。
- * 6. 返回最后一个 stage 的退出码。
+ * Overall strategy:
+ * 1. pre-create N-1 pipes.
+ * 2. fork N children and wire stdin/stdout by stage(i).
+ * 3. children close all original pipe fds to avoid leaks/EOF hangs.
+ * 4. child then applies its own < / > / >> redirection (overrides pipeline wiring).
+ * 5. parent closes all pipe fds and waits for all children.
+ * 6. return exit status of the last stage.
  */
 static int run_pipe(CommandLine *cmdline, OperatorType expected_op, const char *where, bool reverse)
 {
@@ -957,7 +1028,7 @@ static int run_pipe(CommandLine *cmdline, OperatorType expected_op, const char *
         }
     }
 
-    // 这里的 i 表示“执行链中的 stage 序号”，不是原始 cmd 下标。
+    // here i is stage index in the execution chain, not original cmd index.
     // reverse=false: cmd_idx=i
     // reverse=true : cmd_idx=cmd_count-1-i
     for (i = 0; i < cmd_count; i++)
@@ -984,24 +1055,24 @@ static int run_pipe(CommandLine *cmdline, OperatorType expected_op, const char *
 
         if (pid == 0)
         {
-            // stage i 的输入来自上一根管道读端，输出去下一根管道写端。
-            // 不论正向/反向，这个接线规则都保持一致；
-            // 差异只在于 cmd_idx 映射到哪个命令。
+            // stage i reads from previous pipe and writes to next pipe.
+            // this wiring rule is identical for forward and reverse modes;
+            // the only difference is which command cmd_idx maps to.
             if (i > 0)
                 dup2(pipes[i - 1][0], STDIN_FILENO);
             if (i < cmd_count - 1)
                 dup2(pipes[i][1], STDOUT_FILENO);
 
-            // 关闭子进程中所有原始管道 fd：
-            // 否则可能导致写端未真正关闭，读端收不到 EOF。
+            // close all original pipe fds in child:
+            // otherwise write ends may remain open and readers never see EOF.
             for (j = 0; j < cmd_count - 1; j++)
             {
                 close(pipes[j][0]);
                 close(pipes[j][1]);
             }
 
-            // 文件重定向优先级高于管道接线：
-            // 例如 cmd < in.txt | ...，该 cmd 的 stdin 最终来自文件。
+            // file redirection has higher priority than pipeline wiring:
+            // for example in cmd < in.txt | ..., stdin ultimately comes from file.
             if (cmd->redirect_in)
             {
                 int fd = open(cmd->input_file, O_RDONLY);
@@ -1035,14 +1106,14 @@ static int run_pipe(CommandLine *cmdline, OperatorType expected_op, const char *
         pids[i] = pid;
     }
 
-    // 父进程不参与读写，必须关闭全部 pipe fd，避免子进程读端阻塞等 EOF。
+    // parent does not read/write data; must close all pipe fds to avoid EOF-related blocking.
     for (i = 0; i < cmd_count - 1; i++)
     {
         close(pipes[i][0]);
         close(pipes[i][1]);
     }
 
-    // 等待所有 stage；按当前实现返回“最后一个 stage(i=cmd_count-1)”的退出码。
+    // wait for all stages; current implementation returns exit code of last stage (i=cmd_count-1).
     for (i = 0; i < cmd_count; i++)
     {
         int status;
@@ -1062,7 +1133,7 @@ static int exc_word_count_cmd(const Command *cmd);
 static int exc_txt_cat_cmd(const Command *cmd);
 static int exc_txt_app_cmd(const Command *cmd);
 
-// 给定 pid，判断是否和当前进程运行的是同一个可执行文件
+// Given pid, check whether it runs the same executable as current process
 static bool is_same_executable_as_self(pid_t pid)
 {
     char self_exe[PATH_MAX];
@@ -1086,7 +1157,7 @@ static bool is_same_executable_as_self(pid_t pid)
     return strcmp(self_exe, other_exe) == 0;
 }
 
-// 判断目标 pid 是否运行在“不同终端”上
+// Check whether target pid is running on a different terminal
 static bool is_on_different_terminal_from_self(pid_t pid)
 {
     char self_tty[PATH_MAX];
@@ -1094,14 +1165,14 @@ static bool is_on_different_terminal_from_self(pid_t pid)
     char fd0_link[64];
     ssize_t n;
 
-    // 当前进程终端（例如 /dev/pts/3）
+    // current process terminal (e.g., /dev/pts/3)
     if (ttyname_r(STDIN_FILENO, self_tty, sizeof(self_tty)) != 0)
         return false;
 
     if (snprintf(fd0_link, sizeof(fd0_link), "/proc/%d/fd/0", (int)pid) >= (int)sizeof(fd0_link))
         return false;
 
-    // 读取目标进程 stdin 指向的终端设备
+    // read terminal device that target process stdin points to
     n = readlink(fd0_link, other_tty, sizeof(other_tty) - 1);
     if (n < 0)
         return false;
@@ -1110,7 +1181,7 @@ static bool is_on_different_terminal_from_self(pid_t pid)
     return strcmp(self_tty, other_tty) != 0;
 }
 
-// 向其它 minibash 实例发送信号（不包含当前进程），返回成功发送的数量
+// Send signal to other minibash instances (excluding self), return successful count
 static int signal_other_minibash_instances(int sig)
 {
     DIR *dir;
@@ -1145,7 +1216,7 @@ static int signal_other_minibash_instances(int sig)
         if (!is_same_executable_as_self(pid))
             continue;
 
-        // killallmb 作用于“不同终端”上的 minibash。
+        // killallmb targets minibash instances on different terminals.
         if (!is_on_different_terminal_from_self(pid))
             continue;
 
@@ -1157,7 +1228,7 @@ static int signal_other_minibash_instances(int sig)
     return count;
 }
 
-// 根据命令节点类型(NodeType)分发到对应的执行函数
+// Dispatch to execution function by command node type (NodeType)
 static int do_dispatch_cmd(const Command *cmd, const char *where)
 {
     switch (cmd->node_type)
@@ -1181,7 +1252,7 @@ static int do_dispatch_cmd(const Command *cmd, const char *where)
     }
 }
 
-// 执行内置命令，返回 0 表示成功执行了内置命令，负数表示不是内置命令或执行失败
+// Execute builtin command: return 0 if handled, negative if not builtin or failed
 static int exc_builtin_cmd(const Command *cmd)
 {
     const char *name = cmd->argv[0];
@@ -1189,7 +1260,7 @@ static int exc_builtin_cmd(const Command *cmd)
     if (strcmp(name, "killmb") == 0)
     {
         printf("minibash: exiting.\n");
-        // 结束当前 minibash 终端会话。
+        // terminate current minibash terminal session.
         exit(0);
     }
 
@@ -1258,7 +1329,7 @@ static int exc_builtin_cmd(const Command *cmd)
     return -1;
 }
 
-// 执行单个命令，处理内置命令和外部命令
+// Execute single command, handling builtin and external commands
 static int exc_single_cmd(const Command *cmd)
 {
     if (cmd->argc <= 0)
@@ -1272,18 +1343,18 @@ static int exc_single_cmd(const Command *cmd)
 }
 
 /**
- * 执行命令序列，按照顺序依次执行每个命令，不管前一个命令的结果如何。
- * 例如：`cmd1 ; cmd2 ; cmd3` 会先执行 cmd1 -> cmd2 -> cmd3。
- * 1. 校验 cmdline 合法性
- * 2. 校验这条命令链确实是纯 ;（OP_SEQ）序列
- * 3. 按顺序遍历每个 Command
- * 4. 用 switch (cmd->node_type) 分发到对应 exc_* 函数
- * 5. 返回最后一个命令的退出码
+ * Execute command sequence in order, regardless of previous result.
+ * Example: `cmd1 ; cmd2 ; cmd3` executes cmd1 -> cmd2 -> cmd3.
+ * 1. validate cmdline input
+ * 2. validate operator chain is pure ; (OP_SEQ)
+ * 3. iterate through each Command in order
+ * 4. dispatch to matching exc_* function via switch(cmd->node_type)
+ * 5. return exit status of the last command
  */
 static int exc_sequence_cmd(CommandLine *cmdline)
 {
     int i;
-    int last_rc = 0; // 最后一个命令的返回码
+    int last_rc = 0; // return code of the last command
 
     if (cmdline == NULL || cmdline->cmd_count <= 0)
         return -1;
@@ -1313,20 +1384,20 @@ static int exc_sequence_cmd(CommandLine *cmdline)
 }
 
 /**
- * 执行条件命令，按照左到右的顺序执行每个命令，根据连接符和前一个命令的结果决定是否执行下一个命令。
- * 操作符必须全是 OP_AND 或 OP_OR，不能混合其他类型的操作符。
- * 例如：`cmd1 && cmd2 || cmd3` 会先执行 cmd1，如果 cmd1 成功（返回码 0）则执行 cmd2，否则执行 cmd3。
- * 1. 第一条命令无条件执行
- * 2. 后续按短路规则从左到右执行
- * 3. &&: 上一条成功(last_rc == 0)才执行下一条
- * 4. ||: 上一条失败(last_rc != 0)才执行下一条
+ * Execute conditional commands left-to-right based on operator and previous result.
+ * Operators must be only OP_AND or OP_OR; no other types allowed.
+ * Example: `cmd1 && cmd2 || cmd3` executes cmd1 first; run cmd2 if cmd1 succeeds (0), otherwise run cmd3.
+ * 1. first command executes unconditionally
+ * 2. then evaluate left-to-right with short-circuit rules
+ * 3. &&: run next only if previous succeeded (last_rc == 0)
+ * 4. ||: run next only if previous failed (last_rc != 0)
  */
 static int exc_conditional_cmd(CommandLine *cmdline)
 {
     int i;
     int last_rc = 0;
 
-    // 基本合法性检查
+    // basic validity checks
     if (cmdline == NULL || cmdline->cmd_count <= 0)
         return -1;
 
@@ -1371,37 +1442,37 @@ static int exc_conditional_cmd(CommandLine *cmdline)
 }
 
 /*
- * exc_pipe_cmd – 执行管道：cmd0 | cmd1 | ... | cmdN-1
- * 策略：
- * 1. 预先创建 N-1 个管道（pipes[i] 连接 cmd[i] 的标准输出 → cmd[i+1] 的标准输入）。
- * 2. 在关闭父进程中的任何内容之前，先创建所有 N 个子进程，以避免在下一个子进程继承之前意外关闭写入结束符。
- * 3. 在所有子进程创建完成后，关闭父进程中的所有管道文件描述符。
- * 4. 等待所有子进程完成；返回最后一个子进程的退出状态。
+ * exc_pipe_cmd - Execute pipeline: cmd0 | cmd1 | ... | cmdN-1
+ * Strategy:
+ * 1. pre-create N-1 pipes (pipes[i] connects stdout of cmd[i] to stdin of cmd[i+1]).
+ * 2. create all N children before closing parent fds to avoid inheritance timing issues.
+ * 3. after all children are created, close all pipe fds in parent.
+ * 4. wait for all children; return exit status of last child.
  */
 static int exc_pipe_cmd(CommandLine *cmdline)
 {
-    // 正向管道：cmd0 | cmd1 | ... | cmdN-1
+    // forward pipeline: cmd0 | cmd1 | ... | cmdN-1
     return run_pipe(cmdline, OP_PIPE, "pipe", false);
 }
 
-// 反向管道：cmd0 ~ cmd1 ~ ... ~ cmdN-1
+// reverse pipeline: cmd0 ~ cmd1 ~ ... ~ cmdN-1
 static int exc_reverse_pipe_cmd(CommandLine *cmdline)
 {
-    // 按右到左执行，即 cmdN-1 先产出，最终流向 cmd0。
+    // execute right-to-left: cmdN-1 produces first and output ultimately flows to cmd0.
     return run_pipe(cmdline, OP_REVERSE_PIPE, "reverse pipe", true);
 }
 
 /**
- * exc_fifo_write_cmd – 执行 FIFO 写命令：cmd >|||
- * 策略：
- * 1. 参数校验：||| 写端必须有可执行命令（cmd->argc > 0），且不能是内置命令
- * 2. FIFO 路径：~/Assignments/Assignment3/minibash_fifo
- * 3. 创建 FIFO：如果不存在则创建，权限 0666
- * 4. 非阻塞打开写端（O_WRONLY | O_NONBLOCK）：
- *      无读端时不会卡死 shell
- *      给出明确错误提示
- * 5. 重定向：调用 run_cmd(cmd, ..., stdout_fd=fifo_fd) 把命令输出写入 FIFO
- * 6. 错误处理：参数不对、内置命令、FIFO 创建/打开失败都会报错并返回 -1
+ * exc_fifo_write_cmd - Execute FIFO write command: cmd >|||
+ * Strategy:
+ * 1. argument check: FIFO writer requires executable command (cmd->argc > 0), not builtin
+ * 2. FIFO path: ~/Assignments/Assignment3/minibash_fifo
+ * 3. create FIFO if missing, mode 0666
+ * 4. open writer in non-blocking mode (O_WRONLY | O_NONBLOCK):
+ *      shell does not hang when no reader exists
+ *      print explicit error message
+ * 5. redirection: run_cmd(cmd, ..., stdout_fd=fifo_fd) writes command output to FIFO
+ * 6. error handling: invalid args, builtin misuse, or FIFO create/open failure returns -1 with message
  */
 static int exc_fifo_write_cmd(const Command *cmd)
 {
@@ -1418,7 +1489,7 @@ static int exc_fifo_write_cmd(const Command *cmd)
     if (ensure_common_fifo(fifo_path, sizeof(fifo_path)) < 0)
         return -1;
 
-    // 非阻塞打开写端：若当前没有读端，直接返回错误而不是挂住 shell。
+    // open writer non-blocking: if no reader exists, return error instead of hanging shell.
     fd = open(fifo_path, O_WRONLY | O_NONBLOCK);
     if (fd < 0)
     {
@@ -1430,7 +1501,7 @@ static int exc_fifo_write_cmd(const Command *cmd)
     }
 
     foreground = !cmd->run_in_background;
-    // 把当前命令标准输出重定向到公共 FIFO。
+    // redirect current command stdout to the shared FIFO.
     {
         int rc = run_cmd(cmd, foreground, -1, fd);
         close(fd);
@@ -1439,14 +1510,14 @@ static int exc_fifo_write_cmd(const Command *cmd)
 }
 
 /**
- * exc_fifo_read_cmd – 执行 FIFO 读命令：cmd <|||
- * 策略：
- * 1. 参数校验：||| 读端必须有可执行命令（cmd->argc > 0），且不能是内置命令
- * 2. FIFO 路径：~/Assignments/Assignment3/minibash_fifo， 调用 ensure_common_fifo(...) 获取路径
- * 3. 打开 FIFO 读端：open(fifo_path, O_RDONLY)（阻塞模式），没有写端时等待数据到来
- * 4. 执行命令：run_cmd(cmd, foreground, fifo_fd, -1)，把 FIFO 接到命令 stdin
- * 5. 清理：父进程关闭 fd
- * 6. 错误处理：参数不对、内置命令、FIFO 创建/打开失败都会报错并返回
+ * exc_fifo_read_cmd - Execute FIFO read command: cmd <|||
+ * Strategy:
+ * 1. argument check: FIFO reader requires executable command (cmd->argc > 0), not builtin
+ * 2. FIFO path: ~/Assignments/Assignment3/minibash_fifo, resolved by ensure_common_fifo(...)
+ * 3. Open FIFO reader side with open(fifo_path, O_RDONLY) in blocking mode; wait if no writer exists
+ * 4. execute command with run_cmd(cmd, foreground, fifo_fd, -1) so FIFO feeds stdin
+ * 5. cleanup: parent closes fd
+ * 6. error handling: invalid args, builtin misuse, FIFO create/open failure
  */
 static int exc_fifo_read_cmd(const Command *cmd)
 {
@@ -1463,7 +1534,7 @@ static int exc_fifo_read_cmd(const Command *cmd)
     if (ensure_common_fifo(fifo_path, sizeof(fifo_path)) < 0)
         return -1;
 
-    // 读端使用阻塞打开：没有写端时等待数据到来。
+    // reader uses blocking open: waits for writer/data when absent.
     fd = open(fifo_path, O_RDONLY);
     if (fd < 0)
     {
@@ -1472,7 +1543,7 @@ static int exc_fifo_read_cmd(const Command *cmd)
     }
 
     foreground = !cmd->run_in_background;
-    // 把公共 FIFO 作为当前命令的标准输入。
+    // use shared FIFO as current command stdin.
     {
         int rc = run_cmd(cmd, foreground, fd, -1);
         close(fd);
@@ -1481,13 +1552,13 @@ static int exc_fifo_read_cmd(const Command *cmd)
 }
 
 /**
- * exc_word_count_cmd – 执行单词计数命令：# filename.txt
- * * 策略：
- * 1. 参数校验：必须是且仅是 1 个参数
- * 2. 文件类型校验：参数必须以 .txt 结尾
- * 3. 文件读取：按空白分词逐个统计
- * 4. 输出：打印单词总数（仅数字）
- * 5. 错误处理：参数不对、非 .txt、文件打开/读取失败都会报错并返回 -1
+ * exc_word_count_cmd - Execute word-count command: # filename.txt
+ * * Strategy:
+ * 1. argument check: must be exactly one argument
+ * 2. file type check: argument must end with .txt
+ * 3. file read: split by whitespace and count words
+ * 4. output: print total word count (number only)
+ * 5. error handling: invalid args, non-.txt, file open/read failure return -1
  */
 static int exc_word_count_cmd(const Command *cmd)
 {
@@ -1496,8 +1567,8 @@ static int exc_word_count_cmd(const Command *cmd)
     char word[MAX_LINE];
     long long count = 0;
 
-    // 规范里 # 是一元操作：# sample.txt
-    // 这里要求正好一个参数，并且是 .txt 文件。
+    // Per spec, # is a unary operation: # sample.txt
+    // require exactly one argument and it must be a .txt file.
     if (cmd == NULL || cmd->argc != 1)
     {
         fprintf(stderr, "minibash: #: expected exactly one .txt file\n");
@@ -1518,7 +1589,7 @@ static int exc_word_count_cmd(const Command *cmd)
         return -1;
     }
 
-    // 以空白符分隔读取“单词”。
+    // read words separated by whitespace.
     while (fscanf(fp, "%511s", word) == 1)
         count++;
 
@@ -1531,19 +1602,19 @@ static int exc_word_count_cmd(const Command *cmd)
 
     fclose(fp);
 
-    // 输出该文件的单词数量。
+    // print word count for this file.
     printf("%lld\n", count);
     return 0;
 }
 
 /**
- * exc_txt_cat_cmd – 执行文本连接命令：+ file1.txt file2.txt ...
- * 策略：
- * 1. 参数校验：必须至少有 1 个参数
- * 2. 文件类型校验：每个参数必须以 .txt 结尾
- * 3. 文件读取：按用户输入顺序依次读取每个文本文件内容
- * 4. 输出：将所有文本文件内容连接输出到标准输出
- * 5. 错误处理：参数不对、非 .txt、文件打开/读取失败都会报错并返回 -1
+ * exc_txt_cat_cmd - Execute text concatenation command: + file1.txt file2.txt ...
+ * Strategy:
+ * 1. argument check: requires at least one argument
+ * 2. file type check: each argument must end with .txt
+ * 3. file read: read each text file in user-specified order
+ * 4. output: concatenate all text contents to stdout
+ * 5. error handling: invalid args, non-.txt, file open/read failure return -1
  */
 static int exc_txt_cat_cmd(const Command *cmd)
 {
@@ -1555,7 +1626,7 @@ static int exc_txt_cat_cmd(const Command *cmd)
         return -1;
     }
 
-    // 按用户输入顺序依次读取并输出每个文本文件内容。
+    // read and print each text file in user input order.
     for (i = 0; i < cmd->argc; i++)
     {
         const char *path = cmd->argv[i];
@@ -1585,16 +1656,16 @@ static int exc_txt_cat_cmd(const Command *cmd)
 }
 
 /**
- * exc_txt_app_cmd – 执行文本追加命令：file1.txt ++ file2.txt
- * 策略：
- * 1. 参数校验：必须且仅有 2 个参数
- * 2. 文件类型校验：每个参数必须以 .txt 结尾
- * 3. 先读取 file1 原始内容到内存 buf1
- * 4. 再读取 file2 原始内容到内存 buf2
- * 5. 把 buf2 追加到 file1
- * 6. 把 buf1 追加到 file2
- * 7. 文件写入：将 file2.txt 的原始内容追加到 file1.txt，将 file1.txt 的原始内容追加到 file2.txt
- * 8. 错误处理：参数不对、非 .txt、文件打开/读取/写入失败都会报错并返回 -1
+ * exc_txt_app_cmd - Execute text append command: file1.txt ++ file2.txt
+ * Strategy:
+ * 1. argument check: must be exactly two arguments
+ * 2. file type check: each argument must end with .txt
+ * 3. read original file1 content into memory buf1
+ * 4. then read original file2 content into memory buf2
+ * 5. append buf2 to file1
+ * 6. append buf1 to file2
+ * 7. file write: append original file2 content to file1, and original file1 content to file2
+ * 8. error handling: invalid args, non-.txt, file open/read/write failure return -1
  */
 static int exc_txt_app_cmd(const Command *cmd)
 {
@@ -1605,8 +1676,8 @@ static int exc_txt_app_cmd(const Command *cmd)
     size_t buf1_len = 0;
     size_t buf2_len = 0;
 
-    // 规范里 ++ 是二元操作：file1.txt ++ file2.txt
-    // 需要把 file2 原始内容追加到 file1，同时把 file1 原始内容追加到 file2。
+    // Per spec, ++ is a binary operation: file1.txt ++ file2.txt
+    // append original file2 content to file1 and original file1 content to file2.
     if (cmd == NULL || cmd->argc != 2)
     {
         fprintf(stderr, "minibash: ++: expected exactly two .txt files\n");
@@ -1628,7 +1699,7 @@ static int exc_txt_app_cmd(const Command *cmd)
         return -1;
     }
 
-    // 先读取两个文件的原始快照，避免互相覆盖污染。
+    // read original snapshots of both files first to avoid cross-overwrite.
     if (read_file_all(path1, &buf1, &buf1_len) < 0)
         return -1;
 
@@ -1638,7 +1709,7 @@ static int exc_txt_app_cmd(const Command *cmd)
         return -1;
     }
 
-    // 用 file2 的原始快照追加到 file1。
+    // append file2 original snapshot to file1.
     if (append_buffer_to_file(path1, buf2, buf2_len) < 0)
     {
         free(buf1);
@@ -1646,7 +1717,7 @@ static int exc_txt_app_cmd(const Command *cmd)
         return -1;
     }
 
-    // 用 file1 的原始快照追加到 file2。
+    // append file1 original snapshot to file2.
     if (append_buffer_to_file(path2, buf1, buf1_len) < 0)
     {
         free(buf1);
@@ -1659,7 +1730,7 @@ static int exc_txt_app_cmd(const Command *cmd)
     return 0;
 }
 
-// 根据解析结果中的命令类型调用不同的执行函数
+// Call different executors based on parsed command/operator types
 static int do_execute(CommandLine *cmdline)
 {
     int i;
@@ -1668,11 +1739,11 @@ static int do_execute(CommandLine *cmdline)
     if (cmdline == NULL || cmdline->cmd_count == 0)
         return -1;
 
-    // 单命令直接根据 node_type 分发
+    // single command: dispatch directly by node_type
     if (cmdline->cmd_count == 1)
         return do_dispatch_cmd(&cmdline->cmds[0], "single");
 
-    // 多命令需要根据连接符类型分发
+    // multiple commands: dispatch by connector type
     for (i = 0; i < cmdline->op_count; i++)
     {
         switch (cmdline->ops[i])
@@ -1754,7 +1825,7 @@ int main(void)
             continue;
         }
 
-        line[strcspn(line, "\n")] = '\0'; // 去掉末尾的换行符
+        line[strcspn(line, "\n")] = '\0'; // strip trailing newline
 
         trim_inplace(line);
 
@@ -1766,7 +1837,7 @@ int main(void)
         Token tokens[MAX_TOKENS];
         CommandLine parsed;
 
-        // 词法分析和语法分析
+        // lexical and syntax analysis
         int ntok = do_lex(line, tokens, MAX_TOKENS);
 
         if (ntok < 0)
@@ -1782,10 +1853,10 @@ int main(void)
             continue;
         }
 
-        // 这里根据 parsed 中的命令类型调用不同的执行函数
+        // execute by command types parsed into parsed structure
         do_execute(&parsed);
 
-        // 释放解析结果中分配的内存
+        // free memory allocated in parsed result
         free_parsed_command_line(&parsed);
     }
 
