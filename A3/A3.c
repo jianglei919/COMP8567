@@ -1660,7 +1660,7 @@ static int exc_txt_app_cmd(const Command *cmd)
 }
 
 // 根据解析结果中的命令类型调用不同的执行函数
-static int do_parsed(CommandLine *cmdline)
+static int do_execute(CommandLine *cmdline)
 {
     int i;
     ExecType dispatch = EXEC_SINGLE;
@@ -1732,7 +1732,7 @@ int main(void)
 
     while (1)
     {
-        bg_reap(); /* reap any finished bg children */
+        bg_reap(); /* reap any finished bg children and keep bg_count accurate. */
         printf("minibash$ ");
         fflush(stdout);
 
@@ -1783,7 +1783,7 @@ int main(void)
         }
 
         // 这里根据 parsed 中的命令类型调用不同的执行函数
-        do_parsed(&parsed);
+        do_execute(&parsed);
 
         // 释放解析结果中分配的内存
         free_parsed_command_line(&parsed);
